@@ -31,7 +31,7 @@ html,body{margin:0}body{min-width:628px}.chatDark{position:fixed;inset:0;backgro
 let list=q('.messageMessageListlist');list.scrollTop=400;
 let result={vw:innerWidth,vh:innerHeight,shell:rect('.componentsEntrywrapper'),panel:rect('.componentsRightPanelwrapper'),input:rect('.componentsRightPanelinputArea'),list:rect('.messageMessageListlist'),scroll:list.scrollTop,bg:getComputedStyle(q('.componentsEntrywrapper')).backgroundColor,menu:getComputedStyle(q('#menu')).display,send:getComputedStyle(q('#send')).display};
 parent.postMessage(result,'*');</script>'''.replace('CSS', css)
-scratch=pathlib.Path('/Users/zhanghongsheng/.hermes/profiles/shayu/cache/scratch')
+scratch=pathlib.Path(tempfile.gettempdir())
 with tempfile.TemporaryDirectory(prefix='chat-css-', dir=scratch) as d:
     p=pathlib.Path(d)/'fixture.html'
     for width,height in [(382,720),(620,760)]:

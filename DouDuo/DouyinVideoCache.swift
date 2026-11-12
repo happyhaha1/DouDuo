@@ -30,6 +30,28 @@ struct DYFeedSession: Codable {
     }
 }
 
+/// 会话落盘节流器：把 200ms 内的多次保存合并成一次，JSON 编码与写文件都放到串行后台队列。
+/// 原来每次划走都在主线程编码最多 80 条作品 + 原子写文件，正好压在翻页动画上。
+/// 只在主线程调用（schedule / flushNow 都是主线程触发）。
+final class DYFeedSessionSaver: ObservableObject {
+    private let queue = DispatchQueue(label: "douduo.feed.session.save", qos: .utility)
+    private var pending: DispatchWorkItem?
+
+    func schedule(_ session: DYFeedSession) {
+        pending?.cancel()
+        let work = DispatchWorkItem { session.save() }
+        pending = work
+        queue.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+
+    /// 切后台 / 退出前用：同步写完再返回，避免进程被挂起丢掉最后一次进度
+    func flushNow(_ session: DYFeedSession) {
+        pending?.cancel()
+        pending = nil
+        queue.sync { session.save() }
+    }
+}
+
 actor DYVideoCache {
     static let shared = DYVideoCache()
     static let countKey = "douyin_cache_count_v2"
@@ -38,8 +60,9 @@ actor DYVideoCache {
     static let maxDuration: Double = 600
     /// 头部缓存字节数：约 6–20 秒（抖音码率 0.5–3 Mbps），够起播
     static let headBytes = 4_000_000
-    /// 后面几条做头部预取（刷过来不卡的关键）
-    static let headPrefetch = 2
+    /// 后面几条做整条预取（刷过来不卡的关键）。只留 1 条：整条下载会吃掉正在播那条的带宽，
+    /// 滑到就播靠上面 DYPreloader 的 preroll，不靠预下载。
+    static let headPrefetch = 1
     /// 保守按 3.2 Mbps 折算，宁可早一点切在线流，也不要播到没数据的尾部
     static let assumeBitsPerSecond: Double = 2_500_000
     static let maxBytes = 2 * 1024 * 1024 * 1024
@@ -113,7 +136,8 @@ actor DYVideoCache {
 
     init() {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 2
+        // 预取是"锦上添花"，不该跟正在起播的播放器抢带宽：串行一条一条下
+        cfg.httpMaximumConnectionsPerHost = 1
         cfg.timeoutIntervalForRequest = 30
         cfg.timeoutIntervalForResource = 600
         cfg.waitsForConnectivity = false
@@ -130,21 +154,25 @@ actor DYVideoCache {
         }
     }
 
-    /// 播放焦点变了：缓存在播的这条（划走上一条就停），并预取后面几条的头部
+    /// 播放焦点变了：只预取「后面几条」，不动正在播的这一条。
+    /// 以前先下 current：它和播放器拉的是同一个 CDN 地址，等于把同一条视频拉两遍，
+    /// 起播最需要带宽的那几秒被后台下载抢走。预取窗口本身就覆盖了「迟早要播」的内容，
+    /// 所以缓存覆盖率不变；只有列表末尾（后面没有可预取的）才回落到缓存当前条。
     func focus(current: DYAweme?, ahead: [DYAweme]) {
         guard Self.limit > 0 else { job?.cancel(); job = nil; jobID = nil; return }
-        let target = current ?? ahead.first
-        guard let target else { return }
-        if jobID == target.id, job != nil { return }
+        let follow = Array(ahead.prefix(Self.headPrefetch))
+        let target = follow.isEmpty ? current : nil
+        guard target != nil || !follow.isEmpty else { return }
+        let jobKey = target?.id ?? follow.map(\.id).joined(separator: ",")
+        if jobID == jobKey, job != nil { return }
         job?.cancel()
         job = nil
-        jobID = target.id
-        let follow = Array(ahead.dropFirst().prefix(Self.headPrefetch))
-        pending[target.id] = target
+        jobID = jobKey
+        if let target { pending[target.id] = target }
         for a in follow { pending[a.id] = a }
         job = Task { [weak self] in
             guard let self else { return }
-            await self.store(id: target.id)
+            if let target { await self.store(id: target.id) }
             for a in follow {
                 if Task.isCancelled { return }
                 await self.store(id: a.id)

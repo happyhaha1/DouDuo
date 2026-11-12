@@ -948,7 +948,7 @@ private struct DYPlayerLayerView: UIViewRepresentable {
 /// 封面同时预取。窗口外的立即释放（硬解码会话有限，不能无限开）。
 @MainActor
 final class DYPreloader {
-    static let ahead = 3   // 提前暖 3 条；微热降到 2、烫了 1
+    static let ahead = 3   // 暖 3 条：滑到就能直接播；微热降到 1、烫了 0
     private var players: [String: AVPlayer] = [:]
     private var handedOut: Set<String> = []
     private var obs: [String: NSKeyValueObservation] = [:]
@@ -961,7 +961,7 @@ final class DYPreloader {
     func update(_ items: [DYAweme], current index: Int) {
         guard !disabled, items.indices.contains(index) else { return }
         let th = ProcessInfo.processInfo.thermalState
-        let ahead = th == .nominal ? Self.ahead : (th == .fair ? 2 : 1)
+        let ahead = th == .nominal ? Self.ahead : (th == .fair ? 1 : 0)
         let lo = index + 1, hi = min(items.count - 1, index + ahead)
         let window = lo <= hi ? Array(items[lo...hi]) : []
         let ids = Set(window.map(\.id))
@@ -975,6 +975,7 @@ final class DYPreloader {
                 continue
             }
             let item = AVPlayerItem(asset: DYMedia.asset(DYVideoCache.localURL(a.id) ?? url))
+            // 预载项不播、只把开头缓冲好：留够 6 秒，滑到时 play() 立刻出画（3 秒在弱网下就会等）
             item.preferredForwardBufferDuration = 6
             let p = AVPlayer(playerItem: item)
             p.isMuted = true
@@ -1183,6 +1184,7 @@ struct DouyinFeedScreen: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var bridge = DouyinBridge()
     @StateObject private var feed = DYFeedModel()
+    @StateObject private var sessionSaver = DYFeedSessionSaver()
     @State private var insets = EdgeInsets()
     @State private var preloader = DYPreloader()
     @State private var resume: [String: Double] = [:]
@@ -1378,7 +1380,7 @@ struct DouyinFeedScreen: View {
             reportWatch(old: old, new: new)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            saveSession()
+            flushSession()
         }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             if DDPlayback.shared.appIsActive { saveSession() }
@@ -1560,13 +1562,26 @@ struct DouyinFeedScreen: View {
         }
     }
 
-    private func saveSession() {
-        guard let id = currentID, feed.items.contains(where: { $0.id == id }) else { return }
+    /// 当前进度快照（只读主线程状态，构造值类型很便宜）
+    private func sessionSnapshot() -> DYFeedSession? {
+        guard let id = currentID, feed.items.contains(where: { $0.id == id }) else { return nil }
         var positions = resume
         if DDNowPlaying.id == id, DDNowPlaying.time.isFinite {
             positions[id] = max(0, DDNowPlaying.time)
         }
-        DYFeedSession(items: feed.items, currentID: id, positions: positions).save()
+        return DYFeedSession(items: feed.items, currentID: id, positions: positions)
+    }
+
+    /// 划走 / 定时保存：编码与写盘都交给后台队列，200ms 内的多次调用合并成一次（原来在主线程压着翻页动画）
+    private func saveSession() {
+        guard let session = sessionSnapshot() else { return }
+        sessionSaver.schedule(session)
+    }
+
+    /// 切后台：最后一次进度必须落盘（后台队列可能来不及跑完就被挂起）
+    private func flushSession() {
+        guard let session = sessionSnapshot() else { return }
+        sessionSaver.flushNow(session)
     }
 
     /// 自动连播：播完滑到下一条；快到底时先补一页
@@ -1923,8 +1938,13 @@ struct DouyinFeedScreen: View {
     private func page(for item: DYAweme) -> some View {
         let extras = AnyView(moreExtrasMenu(item))
         let active = item.id == currentID && web == nil && tab == .recommend && !overlayOpen
+        // 紧邻当前条的下一条：提前建播放器并预滚，滑到时直接出画（这是"下滑后要等一会"的主因）
+        let nextID = feed.items.firstIndex { $0.id == currentID }
+            .flatMap { feed.items.indices.contains($0 + 1) ? feed.items[$0 + 1].id : nil }
+        let imminent = !active && web == nil && tab == .recommend && !overlayOpen && nextID == item.id
         return DYVideoPage(item: item,
                            isCurrent: active,
+                           isNext: imminent,
                            insets: insets,
                            resume: resume[item.id],
                            liked: feed.liked.contains(item.id),
@@ -2175,6 +2195,8 @@ struct DYVideoPage: View {
     @Environment(\.colorScheme) private var scheme
     let item: DYAweme
     let isCurrent: Bool
+    /// 紧邻当前条的下一条：提前建播放器并预滚，滑到时直接 play()
+    let isNext: Bool
     let insets: EdgeInsets
     let resume: Double?
     let liked: Bool
@@ -2208,13 +2230,13 @@ struct DYVideoPage: View {
     @AppStorage("douyin_autofit_v1") private var autoFit = true
     @AppStorage("douyin_danmaku_v1") private var danmakuOn = true
 
-    init(item: DYAweme, isCurrent: Bool, insets: EdgeInsets, resume: Double?, liked: Bool, collected: Bool,
+    init(item: DYAweme, isCurrent: Bool, isNext: Bool = false, insets: EdgeInsets, resume: Double?, liked: Bool, collected: Bool,
          onLike: @escaping () -> Void, onCollect: @escaping () -> Void, onDoubleTap: @escaping () -> Void,
          onComments: @escaping () -> Void, onSearch: @escaping () -> Void, onAuthor: @escaping () -> Void, onSavePosition: @escaping (Double) -> Void,
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil, moreExtras: AnyView = AnyView(EmptyView()),
          onEnded: (() -> Void)? = nil, onBack: (() -> Void)? = nil) {
-        self.item = item; self.isCurrent = isCurrent; self.insets = insets; self.resume = resume
+        self.item = item; self.isCurrent = isCurrent; self.isNext = isNext; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
         self.onLike = onLike; self.onCollect = onCollect; self.onDoubleTap = onDoubleTap
         self.onComments = onComments; self.onSearch = onSearch; self.onAuthor = onAuthor; self.onSavePosition = onSavePosition
@@ -2231,9 +2253,9 @@ struct DYVideoPage: View {
             if item.images.isEmpty, let s = item.play, let remote = URL(string: s) {
                 // 只用「整条缓存」或「在线流」：不再走头部缓存 + 接续（那一下切换必然闪/卡）
                 let url = DYVideoCache.localURL(item.id) ?? remote
-                // 复用影库播放器：横滑快进（带预览缩略图）、双击、长按 2 倍速、竖滑切视频、底部可拖进度条、VLC 兜底
+                // 复用影库播放器：双击、长按 2 倍速、竖滑切视频、底部可拖进度条（进度只认进度条）、VLC 兜底
                 PlayerPage.external(id: item.id, title: item.desc, url: url, durationSec: item.duration,
-                                    isActive: isCurrent, topInset: insets.top, bottomInset: insets.bottom,
+                                    isActive: isCurrent, isNext: isNext, topInset: insets.top, bottomInset: insets.bottom,
                                     resumePosition: resume, compactChrome: true,
                                     preparedPlayer: { preloader.take(item.id) },
                                     onEnded: autoNext ? onEnded : nil,

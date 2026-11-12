@@ -1,5 +1,5 @@
 // 短视频播放页：从 無為 影库播放器（PlayerPage）精简而来，只留抖音需要的部分——
-// AVPlayer 直连、横滑快进（预览缩略图 + 目标时间 HUD）、双击、长按 2 倍速、单击暂停、竖滑切视频、底部可拖进度条。
+// AVPlayer 直连、双击、长按 2 倍速、单击暂停、竖滑切视频、底部可拖进度条（横滑快进已移除）。
 import SwiftUI
 import AVFoundation
 import MediaPlayer
@@ -142,6 +142,7 @@ enum DYMedia {
 extension PlayerPage {
     /// 与 無為 同名同参的构造入口，DouyinFeedView 原样复用
     static func external(id: String, title: String, url: URL, durationSec: Double, isActive: Bool,
+                         isNext: Bool = false,
                          topInset: CGFloat, bottomInset: CGFloat, resumePosition: Double?,
                          compactChrome: Bool,
                          preparedPlayer: (() -> AVPlayer?)? = nil,
@@ -151,7 +152,7 @@ extension PlayerPage {
                          quality: String? = nil, fastURL: URL? = nil, posterURL: URL? = nil,
                          videoAspect: Double = 0,
                          headEndSeconds: Double? = nil, continuationURL: URL? = nil) -> PlayerPage {
-        PlayerPage(id: id, url: url, knownDuration: durationSec, isActive: isActive, bottomInset: bottomInset,
+        PlayerPage(id: id, url: url, knownDuration: durationSec, isActive: isActive, isNext: isNext, bottomInset: bottomInset,
                    resumePosition: resumePosition, preparedPlayer: preparedPlayer, onEnded: onEnded,
                    onDoubleTap: onDoubleTap, onSavePosition: onSavePosition, fillWidth: fillWidth,
                    topInset: topInset, danmaku: danmaku, altURL: altURL, quality: quality, fastURL: fastURL,
@@ -165,6 +166,8 @@ struct PlayerPage: View {
     let url: URL
     let knownDuration: Double
     let isActive: Bool
+    /// 下一条：页面提前建播放器并预滚，滑到时直接 play()
+    var isNext: Bool = false
     let bottomInset: CGFloat
     let resumePosition: Double?
     let preparedPlayer: (() -> AVPlayer?)?
@@ -285,7 +288,9 @@ struct PlayerPage: View {
                     let screen = g.size.width / max(g.size.height, 1)
                     let video = videoAspect > 0 ? videoAspect : screen
                     let same = (video < 1) == (screen < 1)
-                    CachedAsyncImage(url: posterURL) { img in
+                    // 1600：封面原图 1080×1920，这里不是为了缩小，而是为了走 ImageCache.loadThumb →
+                    // ImageIO 在后台解码。不传这个参数时上是 UIImage(data:) 懒解码，第一帧在主线程解 ~2M 像素。
+                    CachedAsyncImage(url: posterURL, thumbnailMaxPixel: 1600) { img in
                         img.resizable().aspectRatio(contentMode: fillWidth && same ? .fill : .fit)
                     } placeholder: { Color.clear }
                     .frame(width: g.size.width, height: g.size.height)
@@ -296,7 +301,7 @@ struct PlayerPage: View {
             if isActive && (!danmaku.isEmpty || dmStress) {
                 DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
             }
-            // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
+            // 手势层铺满整页（含视频上下黑边）：单击 / 双击 / 长按，竖滑漏给分页（横滑不再改进度）
             if player != nil || vlc != nil { gestures }
             if seeking { seekHUD }
             if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking {
@@ -327,7 +332,10 @@ struct PlayerPage: View {
             if isActive { progressBar.padding(.bottom, max(bottomInset, 8)) }
         }
         .onAppear {
-            if player == nil { setup() }
+            // 当前条和下一条都提前建播放器：下一条只预滚不出声，滑到就能直接 play()。
+            // 再往后的页面不建——否则翻页前后会同时有 5–6 个 AVPlayerItem 拉同一批 CDN 地址。
+            if isActive || isNext, player == nil { setup() }
+            if isNext, !isActive { prerollNext() }
             if isActive { bindRemote() }
             DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() })
         }
@@ -389,7 +397,7 @@ struct PlayerPage: View {
         }
     }
 
-    // MARK: 手势（UIKit 宿主：起手定方向，竖向优先让给分页）
+    // MARK: 手势（UIKit 宿主：单击/双击/长按；横滑不改进度，进度只认底部进度条）
 
     private var gestures: some View {
         PlayerGestureView(
@@ -411,27 +419,7 @@ struct PlayerPage: View {
                 lockedBoost = false; rateBoost = false
                 if let v = vlc { v.setRate(Float(playbackRate)) }
                 else { player?.rate = isPlaying ? Float(playbackRate) : 0 }
-            },
-            onSeekBegan: {
-                guard duration > 0 else { return }
-                if let v = vlc { current = v.current }
-                else if let p = player { current = p.currentTime().seconds } else { return }
-                holdAnchor = current
-                seekPreview = current
-                seeking = true
-            },
-            onSeekChanged: { dx, w in
-                guard duration > 0, seeking else { return }
-                seekPreview = max(0, min(duration, holdAnchor + dx / max(w, 1) * duration * 0.9))
-                seekDelta = seekPreview - current
-                requestPreview(seekPreview)
-            },
-            onSeekEnded: {
-                #if DEBUG
-                    #endif
-                if seeking { seekTo(seekPreview); seeking = false; previewImage = nil }
-            },
-            verticalFirst: true
+            }
         )
     }
 
@@ -468,7 +456,7 @@ struct PlayerPage: View {
         return VStack(spacing: 0) {
             GeometryReader { g in
                 ZStack(alignment: .leading) {
-                    // 平时半透明不挡画面（横滑全屏都能拖进度），拖动时才变实
+                    // 平时半透明不挡画面；进度跳转只在这里（画面上的横滑不改进度），拖动时才变实
                     Capsule().fill(.white.opacity(seeking ? 0.28 : 0.12)).frame(height: (seeking ? 6 : 2) * ui)
                     Capsule().fill(.white.opacity(seeking ? 1 : 0.4)).frame(width: g.size.width * frac, height: (seeking ? 6 : 2) * ui)
                     Circle().fill(.white.opacity(seeking ? 1 : 0.45)).frame(width: (seeking ? 15 : 6) * ui, height: (seeking ? 15 : 6) * ui)
@@ -587,6 +575,17 @@ struct PlayerPage: View {
                 }
             }
         }
+    }
+
+    /// 下一条：只把缓冲和首帧准备好，不出声、不播放；滑到变 active 时直接 play()
+    /// 注意：preroll 只允许在 item 已经是 readyToPlay 后调用，否则 AVFoundation 抛
+    /// NSInvalidArgumentException("cannot service a preroll request until its status is
+    /// AVPlayerStatusReadyToPlay") → abort。没就绪就只管挂着加载，激活时 play() 会等它。
+    private func prerollNext() {
+        guard !isActive, let p = player, let it = p.currentItem, it.status != .failed else { return }
+        p.isMuted = true
+        guard it.status == .readyToPlay else { return }
+        p.preroll(atRate: 1) { _ in }
     }
 
     private func setup() {
