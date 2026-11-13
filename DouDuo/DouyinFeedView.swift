@@ -1173,6 +1173,14 @@ final class DYFeedModel: ObservableObject {
     func reset() { items = []; hasMore = true; error = nil; pool = []; mixCredit = 0; shortCredit = 0 }
 }
 
+private struct DYFeedHostFrameKey: PreferenceKey {
+    static var defaultValue: CGRect { .zero }
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next.width > value.width { value = next }
+    }
+}
+
 private struct DYTopChromeFrameKey: PreferenceKey {
     static var defaultValue: CGRect { .zero }
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
@@ -1227,9 +1235,12 @@ struct DouyinFeedScreen: View {
     /// 顶栏可用宽度：评论栏从右侧滑出时 = 视频区宽度，顶栏跟着视频居中、自适应收紧（默认模式用）
     @State private var topBarWidth: CGFloat?
     @State private var topChrome = CGRect.zero
+    /// 直播视图报上来的布局 A 下窗格，坐标在 `douduo.feed`。
+    @State private var layoutAModuleAnchor = DYLiveModuleAnchor()
+    /// 本视图在 `douduo.feed` 里的框，用来把窗格坐标换成 overlay 的本地坐标。
+    @State private var feedHost = CGRect.zero
     /// 极简模式：长按模块入口时显示当前视频的作者和标题，松开消失
     private let peek = DDPeekInfo.shared
-    @ObservedObject private var railProgress = DDRailProgress.shared
     /// 播放速度（更多 → 倍速）：全局速度，长按锁定只作用于单条视频，不写这里
     @AppStorage("douyin_playback_rate_v1") private var playbackRate = 1.0
     @AppStorage("douyin_bg_play_v1") private var bgPlay = false
@@ -1276,7 +1287,11 @@ struct DouyinFeedScreen: View {
         }
         .overlay {
             if railMode, !clearScreen, !playbackPressHeld, !(tab == .live && (live.clean || live.entered)) {
-                rootActionRail(nil, selector: true)
+                if tab == .live, layoutAModuleAnchor.active, feedHost.width > 1 {
+                    layoutAModuleButton
+                } else {
+                    rootActionRail(nil, selector: true)
+                }
             }
         }
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
@@ -1286,6 +1301,28 @@ struct DouyinFeedScreen: View {
         .onPreferenceChange(DYTopChromeFrameKey.self) { next in
             guard abs(next.maxY - topChrome.maxY) > 0.5 || abs(next.minY - topChrome.minY) > 0.5 else { return }
             topChrome = next
+        }
+        .onPreferenceChange(DYLiveModuleAnchorKey.self) { next in
+            let current = layoutAModuleAnchor
+            guard next.active != current.active || next.compact != current.compact
+                    || abs(next.safeBottom - current.safeBottom) > 0.5
+                    || abs(next.safeTrailing - current.safeTrailing) > 0.5
+                    || abs(next.pane.minX - current.pane.minX) > 0.5
+                    || abs(next.pane.minY - current.pane.minY) > 0.5
+                    || abs(next.pane.width - current.pane.width) > 0.5
+                    || abs(next.pane.height - current.pane.height) > 0.5 else { return }
+            layoutAModuleAnchor = next
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: DYFeedHostFrameKey.self, value: proxy.frame(in: .named("douduo.feed")))
+            }
+            .allowsHitTesting(false)
+        }
+        .onPreferenceChange(DYFeedHostFrameKey.self) { next in
+            guard abs(next.minX - feedHost.minX) > 0.5 || abs(next.minY - feedHost.minY) > 0.5
+                    || abs(next.width - feedHost.width) > 0.5 || abs(next.height - feedHost.height) > 0.5 else { return }
+            feedHost = next
         }
         // 默认模式：顶栏要从物理屏最上沿开始排（外屏/内屏都贴顶），所以整层忽略顶部安全区——和 PR #12 之前完全一致。
         // 简洁/极简模式的 ignoresSafeArea 已在 layoutRoot 上，这里不重复加，避免影响侧边栏的安全区测量。
@@ -1516,7 +1553,37 @@ struct DouyinFeedScreen: View {
         #endif
         let w = geo.size.width, h = geo.size.height
         guard DYDuoMetrics.foldIsActive(geo) else { return w > h }
+        if let p = hingeSplit(geo) { return p.video.width > p.video.height }
         return w > h ? (w * 0.55 > h) : false
+    }
+
+    /// 半折叠按真实折痕切分（同直播 Layout A/B）：视频占折痕前一块，评论占折痕后一块，折痕本身留空。
+    /// 拿不到折痕几何（旧系统 / DOUDUO_FOLD 模拟）时返回 nil，调用方回退到比例切分。
+    private static func hingeSplit(_ geo: GeometryProxy) -> (video: CGRect, panel: CGRect, book: Bool)? {
+        guard DYDuoMetrics.foldIsActive(geo) else { return nil }
+        guard #available(iOS 27.1, *) else { return nil }
+        let divisions = geo.reservedRegions(kind: .division).map {
+            DYLiveDivision(frame: $0.frame, isActive: $0.isActive)
+        }
+        guard let p = DYLiveAdaptiveLayoutEngine.hingePanes(
+            bounds: CGRect(origin: .zero, size: geo.size), divisions: divisions) else { return nil }
+        return (p.first, p.second, p.book)
+    }
+
+    /// 窗格右侧被系统遮挡区（状态栏时间/信号）占掉的宽度，最多让 120pt。
+    private static func trailingOcclusionInset(_ geo: GeometryProxy, pane: CGRect) -> CGFloat {
+        guard #available(iOS 27.1, *) else { return 0 }
+        var inset: CGFloat = 0
+        for region in geo.reservedRegions(kind: .occlusion) where region.isActive {
+            let f = region.frame
+            guard f.width > 1, f.height > 1, f.intersects(pane), f.midX > pane.midX else { continue }
+            inset = max(inset, pane.maxX - f.minX)
+        }
+        return min(max(0, inset), 120)
+    }
+
+    private func foldPanes(_ geo: GeometryProxy) -> (video: CGRect, panel: CGRect, book: Bool)? {
+        tab == .recommend ? Self.hingeSplit(geo) : nil
     }
 
     /// 当前条之后按新的方向/比例重排；不够就接着拉
@@ -1536,6 +1603,7 @@ struct DouyinFeedScreen: View {
     private func sidePanelWidth(_ geo: GeometryProxy) -> CGFloat {
         let fold = tab == .recommend && DYDuoMetrics.foldIsActive(geo)
         let w = geo.size.width, h = geo.size.height
+        if let p = foldPanes(geo) { return p.book ? max(0, w - p.video.width) : 0 }
         let bookFold = fold && w > h
         let sideBySide = w >= DYDuoMetrics.legacyWideMin || bookFold
         let showPanel = fold || (showComments && sideBySide && tab == .recommend)
@@ -1546,15 +1614,21 @@ struct DouyinFeedScreen: View {
         let fold = tab == .recommend && DYDuoMetrics.foldIsActive(geo)
         let wide = geo.size.width >= DYDuoMetrics.legacyWideMin
         let w = geo.size.width, h = geo.size.height
-        let bookFold = fold && w > h          // 书本姿态：左右分
-        let tableFold = fold && w <= h        // 桌面姿态：上下分
+        let hinge = foldPanes(geo)            // 有真实折痕时按折痕切，评论从折痕另一侧开始
+        let bookFold = fold && (hinge.map { $0.book } ?? (w > h))   // 书本姿态：左右分
+        let tableFold = fold && !bookFold     // 桌面姿态：上下分
         let sideBySide = wide || bookFold
         let showPanel = fold || (showComments && sideBySide && tab == .recommend)
 
-        let panelW = sidePanelWidth(geo)
-        let panelH = tableFold ? h * 0.45 : 0
-        let videoW = sideBySide && panelW > 0 ? w - panelW : w
-        let videoH = tableFold ? h - panelH : h
+        let panelW = hinge?.panel.width ?? sidePanelWidth(geo)
+        let panelH = hinge.map { $0.panel.height } ?? (tableFold ? h * 0.45 : 0)
+        let videoW = hinge?.video.width ?? (sideBySide && panelW > 0 ? w - panelW : w)
+        let videoH = hinge?.video.height ?? (tableFold ? h - panelH : h)
+        let panelX = hinge?.panel.minX ?? (sideBySide ? videoW : 0)
+        let panelY = hinge?.panel.minY ?? (tableFold ? videoH : 0)
+        // 书本半折叠：评论起点钉在折痕右侧，右边让开系统状态栏（时间/信号）用内缩，
+        // 否则 DYCommentPanel 里的 DYRailReservedNudge 会把整块面板往左平移、压回折痕甚至视频区。
+        let panelInset = hinge.map { $0.book ? Self.trailingOcclusionInset(geo, pane: $0.panel) : 0 } ?? 0
 
         return ZStack(alignment: .topLeading) {
             feedArea
@@ -1562,9 +1636,9 @@ struct DouyinFeedScreen: View {
             if showPanel, let cur = current {
                 DYCommentPanel(bridge: bridge, aweme: cur,
                                onClose: fold ? nil : { withAnimation(.snappy) { showComments = false } })
-                    .frame(width: sideBySide ? panelW : w,
+                    .frame(width: sideBySide ? max(0, panelW - panelInset) : w,
                            height: tableFold ? panelH : h)
-                    .offset(x: sideBySide ? videoW : 0, y: tableFold ? videoH : 0)
+                    .offset(x: panelX, y: panelY)
                     .id(cur.id)
             }
         }
@@ -1651,6 +1725,10 @@ struct DouyinFeedScreen: View {
     /// 要换一批推荐走「更多 → 刷新推荐」。
     private func selectTab(_ target: DYTab) {
         guard tab != target else { return }
+        if target != .live {
+            queuedLiveAction = nil
+            liveModuleRequest = nil
+        }
         tab = target
     }
 
@@ -1723,7 +1801,8 @@ struct DouyinFeedScreen: View {
         ZStack(alignment: .top) {
             if tab == .live {
                 DYLiveFeed(bridge: bridge, model: live, onWeb: { u in web = DYWebTarget(url: u) }, active: web == nil && !overlayOpen,
-                           topChrome: chromeMode.usesRail ? .zero : topChrome, screenInsets: insets)
+                           topChrome: chromeMode.usesRail ? .zero : topChrome, screenInsets: insets,
+                           moduleRequest: liveModuleRequest, classicPreviewChrome: !chromeMode.usesRail)
             } else if tab == .follow {
                 DYFollowFeed(bridge: bridge, insets: insets, active: tab == .follow && web == nil && !overlayOpen,
                              onAuthor: { a in authorTarget = a.author },
@@ -1914,45 +1993,10 @@ struct DouyinFeedScreen: View {
     }
 
     /// 极简模式：视频进度画成包住圆形入口的外圈。从 12 点方向顺时针走；拖动进度时变粗变亮。
-    @ViewBuilder
+    /// 进度每 0.25 秒更新一次：只让这颗小视图订阅 DDRailProgress，别挂在根视图上（否则整屏跟着重算，1.3.13 卡顿主因）。
     private var railProgressRing: some View {
-        // 简洁 / 极简的推荐页、关注页画进度环；直播没有进度，不画——但占位恒定，切模块时入口位置不动。
-        let show = chromeMode.usesRail && tab != .live
-        let fg = theme.media.onMedia.color(for: scheme)
-        let seeking = railProgress.seeking
-        // 外径 = 右侧胶囊宽度（50pt）。线宽画在圆内侧，所以这个圈的最外沿正好和胶囊左右对齐。
-        let d = DDRailMetrics.entryDiameter
-        let lw: CGFloat = seeking ? 4 : 2.5
-        let r = (d - lw) / 2
-        return ZStack {
-            if show {
-                // 底轨：很淡的整圈
-                Circle().stroke(fg.opacity(0.18), lineWidth: 2.5)
-                // 进度弧：白色渐变（起点淡、终点亮），末端圆头，从 12 点顺时针走
-                Circle()
-                    .trim(from: 0, to: max(railProgress.fraction, 0.004))
-                    .stroke(
-                        AngularGradient(colors: [fg.opacity(0.55), fg], center: .center,
-                                        startAngle: .degrees(0), endAngle: .degrees(360 * max(railProgress.fraction, 0.05))),
-                        style: StrokeStyle(lineWidth: lw, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                // 弧线终点的小亮点
-                Circle()
-                    .fill(fg)
-                    .frame(width: seeking ? 7 : 4.5, height: seeking ? 7 : 4.5)
-                    .offset(y: -r)
-                    .rotationEffect(.degrees(360 * railProgress.fraction))
-                    .opacity(railProgress.fraction > 0.01 ? 1 : 0)
-            }
-        }
-        .padding(lw / 2)
-        .frame(width: d, height: d)
-        .shadow(color: .black.opacity(0.25), radius: 1.5)
-        .animation(.linear(duration: 0.25), value: railProgress.fraction)
-        .allowsHitTesting(false)
-        .accessibilityIdentifier("douyin.module.ring")
-        .accessibilityValue(show ? "\(Int(railProgress.fraction * 100))%" : "")
-        .accessibilityHidden(!show)
+        DDRailProgressRing(show: chromeMode.usesRail && tab != .live,
+                           fg: theme.media.onMedia.color(for: scheme))
     }
 
     /// 模块菜单的内容（单击圆形入口时弹出）。
@@ -1967,6 +2011,20 @@ struct DouyinFeedScreen: View {
             }
             .pickerStyle(.inline)
         }
+        if tab == .live {
+            Section {
+                Button("我的关注", systemImage: "person.2") {
+                    queuedLiveAction = .followedLive
+                    publishQueuedLiveModule()
+                }
+                .accessibilityIdentifier("douyin.module.live.follow")
+                Button("发现更多", systemImage: "square.grid.2x2") {
+                    queuedLiveAction = .discover
+                    publishQueuedLiveModule()
+                }
+                .accessibilityIdentifier("douyin.module.live.discover")
+            }
+        }
         Section {
             Button("搜索", systemImage: "magnifyingglass") { showSearch = true }
                 .accessibilityIdentifier("douyin.module.search")
@@ -1979,8 +2037,24 @@ struct DouyinFeedScreen: View {
     /// 系统 Menu 在长按时也会弹出菜单，没法做到「长按只看作者标题、不弹菜单」，所以统一自己处理：
     /// 单击（按下不满 0.35 秒）弹菜单，长按（满 0.35 秒）显示作者标题，松手消失，不弹菜单。
     @ViewBuilder
-    private func moduleMenu(edge: HorizontalEdge) -> some View {
-        minimalModuleButton(edge: edge)
+    private func moduleMenu(edge: HorizontalEdge, opensUpward: Bool = false) -> some View {
+        minimalModuleButton(edge: edge, opensUpward: opensUpward)
+    }
+
+    /// 布局 A：同一颗模块圆钮改到下窗格右下。清空层不接点击，只有圆钮自己可点。
+    private var layoutAModuleButton: some View {
+        let place = DYLiveLayoutToggle.layoutAModuleFrame(
+            interaction: layoutAModuleAnchor.pane,
+            button: CGSize(width: 54, height: DDRailMetrics.entryDiameter),
+            compact: layoutAModuleAnchor.compact,
+            safeBottom: layoutAModuleAnchor.safeBottom,
+            safeTrailing: layoutAModuleAnchor.safeTrailing)
+        return ZStack {
+            Color.clear.allowsHitTesting(false)
+            moduleMenu(edge: .trailing, opensUpward: true)
+                .position(x: place.midX - feedHost.minX, y: place.midY - feedHost.minY)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var moduleCircleLabel: some View {
@@ -2006,7 +2080,21 @@ struct DouyinFeedScreen: View {
     /// - 按下不满 0.35 秒就抬手 = 单击，弹出菜单，菜单打开期间标题保持显示，菜单收起后才消失；
     /// - 按满 0.35 秒 = 长按，只看标题，不弹菜单。
     @State private var minimalMenuOpen = false
-    private func minimalModuleButton(edge: HorizontalEdge) -> some View {
+    @State private var queuedLiveAction: DYLiveModuleRequest.Action?
+    @State private var liveModuleRequest: DYLiveModuleRequest?
+
+    private func queueLiveModule(_ action: DYLiveModuleRequest.Action) {
+        queuedLiveAction = action
+    }
+
+    private func publishQueuedLiveModule() {
+        guard let action = queuedLiveAction else { return }
+        queuedLiveAction = nil
+        let token = (liveModuleRequest?.token ?? 0) + 1
+        liveModuleRequest = DYLiveModuleRequest(token: token, action: action)
+    }
+
+    private func minimalModuleButton(edge: HorizontalEdge, opensUpward: Bool = false) -> some View {
         moduleCircleLabel
             .contentShape(Circle())
             .modifier(DDPressHold(
@@ -2022,12 +2110,21 @@ struct DouyinFeedScreen: View {
                     if chromeMode.hidesInfo { peek.on = true }
                 }))
             .popover(isPresented: $minimalMenuOpen,
-                     attachmentAnchor: .point(edge == .trailing ? .leading : .trailing),
-                     arrowEdge: edge == .trailing ? .trailing : .leading) {
+                     attachmentAnchor: .point(opensUpward ? .top : (edge == .trailing ? .leading : .trailing)),
+                     arrowEdge: opensUpward ? .bottom : (edge == .trailing ? .trailing : .leading)) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(DYTab.allCases, id: \.self) { target in
                         minimalMenuRow(target.title, target.symbol, selected: tab == target, id: "douyin.module.item.\(target)") {
                             selectTab(target)
+                        }
+                    }
+                    if tab == .live {
+                        Divider().padding(.vertical, 4)
+                        minimalMenuRow("我的关注", "person.2", id: "douyin.module.live.follow") {
+                            queueLiveModule(.followedLive)
+                        }
+                        minimalMenuRow("发现更多", "square.grid.2x2", id: "douyin.module.live.discover") {
+                            queueLiveModule(.discover)
                         }
                     }
                     Divider().padding(.vertical, 4)
@@ -2041,6 +2138,7 @@ struct DouyinFeedScreen: View {
             }
             .onChange(of: minimalMenuOpen) { _, open in
                 if !open, chromeMode.hidesInfo { withAnimation(.easeOut(duration: 0.15)) { peek.on = false } }
+                if !open { publishQueuedLiveModule() }
             }
             .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
@@ -2349,6 +2447,51 @@ private extension Double {
 struct DYWebTarget: Identifiable { let id = UUID(); let url: URL }
 
 /// 右侧功能栏的几何：进度环外径 = 玻璃胶囊宽（50pt）；入口到胶囊的间距沿用胶囊到「更多」的间距（actionGroupSpacing）。
+/// 简洁/极简入口外圈的视频进度环。独立订阅 DDRailProgress，进度变化只重画这颗环。
+private struct DDRailProgressRing: View {
+    let show: Bool
+    let fg: Color
+    @ObservedObject private var railProgress = DDRailProgress.shared
+
+    var body: some View {
+        // 简洁 / 极简的推荐页、关注页画进度环；直播没有进度，不画——但占位恒定，切模块时入口位置不动。
+        let seeking = railProgress.seeking
+        // 外径 = 右侧胶囊宽度（50pt）。线宽画在圆内侧，所以这个圈的最外沿正好和胶囊左右对齐。
+        let d = DDRailMetrics.entryDiameter
+        let lw: CGFloat = seeking ? 4 : 2.5
+        let r = (d - lw) / 2
+        return ZStack {
+            if show {
+                // 底轨：很淡的整圈
+                Circle().stroke(fg.opacity(0.18), lineWidth: 2.5)
+                // 进度弧：白色渐变（起点淡、终点亮），末端圆头，从 12 点顺时针走
+                Circle()
+                    .trim(from: 0, to: max(railProgress.fraction, 0.004))
+                    .stroke(
+                        AngularGradient(colors: [fg.opacity(0.55), fg], center: .center,
+                                        startAngle: .degrees(0), endAngle: .degrees(360 * max(railProgress.fraction, 0.05))),
+                        style: StrokeStyle(lineWidth: lw, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                // 弧线终点的小亮点
+                Circle()
+                    .fill(fg)
+                    .frame(width: seeking ? 7 : 4.5, height: seeking ? 7 : 4.5)
+                    .offset(y: -r)
+                    .rotationEffect(.degrees(360 * railProgress.fraction))
+                    .opacity(railProgress.fraction > 0.01 ? 1 : 0)
+            }
+        }
+        .padding(lw / 2)
+        .frame(width: d, height: d)
+        .shadow(color: .black.opacity(0.25), radius: 1.5)
+        .animation(.linear(duration: 0.25), value: railProgress.fraction)
+        .allowsHitTesting(false)
+        .accessibilityIdentifier("douyin.module.ring")
+        .accessibilityValue(show ? "\(Int(railProgress.fraction * 100))%" : "")
+        .accessibilityHidden(!show)
+    }
+}
+
 enum DDRailMetrics {
     static let entryDiameter: CGFloat = 50
 }

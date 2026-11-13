@@ -449,19 +449,16 @@ struct PlayerPage: View {
         }
         // 设置里改播放速度 = 明确要这个速度：撤掉本条的长按锁定，当前视频立刻生效
         .onChange(of: playbackRate) { _, newRate in
-            // 只有当前这一页自己响应：预加载的相邻页不动，滑过去时由 isActive 路径按新速度起播
+            // 相邻页激活时再按实际倍速校正，1x 不提前解码音频。
             guard isActive else { return }
             if !rateBoost { lockedBoost = false }
             let target = rateBoost ? 2 : newRate
             if let v = vlc { v.setRate(Float(target)); dmClock.sync(v.current, playing: v.isPlaying, rate: target) }
-            else if isPlaying {
-                seamAudio.setRate(Float(target))
-                dmClock.sync(seamAudio.currentMediaTime ?? player?.currentTime().seconds ?? current, playing: isPlaying, rate: target)
-            }
+            else { updateSeamlessRate() }
         }
-        // 锁定/解锁（含锁屏控件改速度）：交给独立音频引擎即时生效
+        // 锁定/解锁（含锁屏控件）不写全局速度，但同样需要校正音频通路。
         .onChange(of: lockedBoost) { _, _ in
-            if vlc == nil, isPlaying, !rateBoost { seamAudio.setRate(Float(effectiveRate)) }
+            if isActive, vlc == nil, !rateBoost { updateSeamlessRate() }
         }
         .onChange(of: isActive) { _, active in
             if !active { lockedBoost = false; pressHeld = false; rateBoost = false }
@@ -487,6 +484,7 @@ struct PlayerPage: View {
                 logSwipeStart(p)
                 #endif
                 isPlaying = true
+                updateSeamlessRate()
                 seamAudio.setActive(true, isPlaying: true, rate: playRate, muted: muted)
                 watchdog(p)
             } else {
@@ -514,12 +512,9 @@ struct PlayerPage: View {
             return
         }
         guard player != nil else { return }
-        // 声音交给独立音频引擎变速（不断流、不爆音），画面速率由引擎的软同步跟随
-        if pressing { rateBoost = true; seamAudio.setRate(2) }
-        else if rateBoost {
-            rateBoost = false
-            if isPlaying { seamAudio.setRate(Float(effectiveRate)) } else { seamAudio.pause() }
-        }
+        if pressing { rateBoost = true }
+        else if rateBoost { rateBoost = false }
+        updateSeamlessRate()
     }
 
     // MARK: 手势（UIKit 宿主：单击/双击/长按；横滑不改进度，进度只认底部进度条）
@@ -699,6 +694,18 @@ struct PlayerPage: View {
         }
     }
 
+    /// 临时倍速、持久倍速和预载页激活共用实际播放速率，避免沿用旧通路。
+    private func updateSeamlessRate() {
+        guard vlc == nil, let p = player else { return }
+        let wantsEngine = abs(playRate - 1) > 0.001
+        if wantsEngine != seamAudio.usesEngine {
+            bindSeamlessAudio(to: p, initialPos: p.currentTime().seconds, active: isActive, playing: isPlaying)
+        } else if isPlaying, seamAudio.targetRate != playRate {
+            seamAudio.setRate(playRate)
+        }
+        dmClock.sync(seamAudio.currentMediaTime ?? p.currentTime().seconds, playing: isActive && isPlaying, rate: Double(playRate))
+    }
+
     private func bindSeamlessAudio(to p: AVPlayer, initialPos: Double?, active: Bool, playing: Bool) {
         seamAudio.onBackgroundEnded = { [weak p] in
             guard let p else { return }
@@ -708,7 +715,8 @@ struct PlayerPage: View {
                 seamAudio.loopToZero(rate: playRate, muted: muted)
             }
         }
-        seamAudio.bind(player: p, initialPosition: initialPos, isActive: active, isPlaying: playing, rate: playRate, muted: muted)
+        seamAudio.bind(player: p, initialPosition: initialPos, isActive: active, isPlaying: playing, rate: playRate, muted: muted,
+                       useEngine: abs(playRate - 1) > 0.001)
     }
 
     /// 下一条：只把缓冲和首帧准备好，不出声、不播放；滑到变 active 时直接 play()

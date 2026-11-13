@@ -591,6 +591,28 @@ final class DouDuoUITests: XCTestCase {
         sleep(4)
         return app
     }
+    /// 合并上游模块入口定位后，三档模式仍可清屏并通过独立按钮退出。
+    func testClearScreenExitAcrossChromeModes() throws {
+        continueAfterFailure = false
+        for mode in ["classic", "rail", "minimal"] {
+            let app = launchChrome(mode)
+            let clear = app.buttons["douyin.clearScreen"].firstMatch
+            XCTAssertTrue(clear.waitForExistence(timeout: 10), "\(mode) 缺少清屏按钮")
+            clear.tap()
+            XCTAssertTrue(wait(label: "退出清屏", on: clear, timeout: 5))
+            XCTAssertFalse(app.buttons["douyin.more"].firstMatch.isHittable)
+            XCTAssertFalse(app.buttons["douyin.module.menu"].firstMatch.isHittable)
+            attach(app, "clear-screen-\(mode)")
+            clear.tap()
+            XCTAssertTrue(wait(label: "清屏", on: clear, timeout: 5), "\(mode) 无法退出清屏")
+            XCTAssertTrue(app.buttons["douyin.more"].firstMatch.isHittable)
+            if mode != "classic" {
+                XCTAssertTrue(app.buttons["douyin.module.menu"].firstMatch.isHittable)
+            }
+            app.terminate()
+        }
+    }
+
 
     func testChromeModeClassicHasTopTabsAndSearchOnRail() throws {
         let app = launchChrome("classic")
