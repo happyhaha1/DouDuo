@@ -1235,6 +1235,10 @@ struct DouyinFeedScreen: View {
     @AppStorage("douyin_bg_play_v1") private var bgPlay = false
     @State private var noticeUnread = 0
     @State private var wideToken = UUID()
+    /// 自动测试用：DOUDUO_OPEN=player 直接打开列表播放器（验证返回键与左缘右滑退出）
+    @State private var debugPlayer = false
+    @State private var playbackPressHeld = false
+    @State private var clearScreen = false
 
     private var currentIndex: Int? { currentID.flatMap { id in feed.items.firstIndex { $0.id == id } } }
     private var current: DYAweme? { currentIndex.map { feed.items[$0] } }
@@ -1258,19 +1262,27 @@ struct DouyinFeedScreen: View {
                         Color.clear.preference(key: DYTopChromeFrameKey.self, value: proxy.frame(in: .named("douduo.feed")))
                     }
                 }
+                .opacity(playbackPressHeld || clearScreen ? 0 : 1)
+                .allowsHitTesting(!playbackPressHeld && !clearScreen)
             }
         }
         .overlayPreferenceValue(DYFeedRailPreference.self) { entries in
             if railMode {
                 let entry = entries.first { $0.tab == tab && (tab != .recommend || $0.id == currentID) }
                 rootActionRail(entry, selector: false)
+                    .opacity(playbackPressHeld ? 0 : 1)
+                    .accessibilityHidden(playbackPressHeld)
             }
         }
         .overlay {
-            if railMode, !(tab == .live && (live.clean || live.entered)) {
+            if railMode, !clearScreen, !playbackPressHeld, !(tab == .live && (live.clean || live.entered)) {
                 rootActionRail(nil, selector: true)
             }
         }
+        .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
+        .environment(\.dyClearScreen, $clearScreen)
+        .onChange(of: tab) { _, _ in clearScreen = false }
+        .statusBarHidden(playbackPressHeld || clearScreen)
         .onPreferenceChange(DYTopChromeFrameKey.self) { next in
             guard abs(next.maxY - topChrome.maxY) > 0.5 || abs(next.minY - topChrome.minY) > 0.5 else { return }
             topChrome = next
@@ -1368,6 +1380,9 @@ struct DouyinFeedScreen: View {
                 case "login": web = DYWebTarget(url: URL(string: "https://www.douyin.com/?recommend=1")!)
                 case "qr": Task { await bridge.debugQRLogin() }
                 case "export": Task { await bridge.debugExportCookies() }
+            #if DEBUG
+            case "player": debugPlayer = true
+            #endif
                 case "import": Task { await bridge.debugImportCookies() }
                 default: break
                 }
@@ -1553,6 +1568,17 @@ struct DouyinFeedScreen: View {
                     .id(cur.id)
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    guard wide, !fold, showComments, tab == .recommend,
+                          value.startLocation.y < videoH - 80,
+                          value.translation.width > 70,
+                          value.translation.width > abs(value.translation.height) * 1.5 else { return }
+                    showComments = false
+                },
+            including: wide && !fold && showComments && tab == .recommend ? .all : .subviews
+        )
         .background(theme.media.strongScrim.color(for: scheme).ignoresSafeArea())
         .animation(.snappy, value: fold)
         .animation(.snappy, value: showComments)
@@ -1753,6 +1779,9 @@ struct DouyinFeedScreen: View {
                 .presentationDetents([.medium, .large])
                 .presentationBackground(.black)
         }
+        .fullScreenCover(isPresented: $debugPlayer) {
+            DYListPlayer(bridge: bridge, title: "调试列表", items: feed.items, start: 0, onAuthor: { _ in })
+        }
 
     }
 
@@ -1850,7 +1879,7 @@ struct DouyinFeedScreen: View {
     /// Empty and live pages reserve the same slots, so changing modules never moves the selector.
     private func rootActionRail(_ entry: DYFeedRailEntry?, selector: Bool) -> some View {
         let groupHeight = 3 * CGFloat(50) + 44 + 3 * theme.media.actionItemSpacing + 16
-        let railHeight = 50 + theme.media.actionGroupSpacing + groupHeight + theme.media.actionGroupSpacing + 50
+        let railHeight = 50 + theme.media.actionGroupSpacing + groupHeight + 2 * theme.media.actionGroupSpacing + 2 * 50
         return DYAdaptiveActionRail { edge in
             // Read the current container's inset before expanding into the outer column.
             // A size class does not describe the width of the system's vertical bar.
@@ -1865,11 +1894,13 @@ struct DouyinFeedScreen: View {
                         } else {
                             Color.clear.frame(height: 50).allowsHitTesting(false)
                         }
+                        if clearScreen { Spacer(minLength: 0) }
                         if let entry {
                             entry.actions.id("\(entry.tab)-\(entry.id)")
                         }
                     }
                     .frame(width: 54, height: railHeight, alignment: .top)
+                    .accessibilityElement(children: .contain)
                     .modifier(DYRailReservedNudge(railEdge: edge, verticalSpace: (-max(0, geometry.size.height - railHeight - 92))...92))
                     .padding(.horizontal, outerPadding)
                     .padding(.bottom, 92)
@@ -2120,8 +2151,7 @@ struct DouyinFeedScreen: View {
                            collected: feed.collected.contains(item.id),
                            onLike: { toggleLike(item.id, force: nil) },
                            onCollect: { toggleCollect(item.id) },
-                           onDoubleTap: { toggleLike(item.id, force: true) },
-                           onComments: { withAnimation(.snappy) { showComments.toggle() } },
+                           onComments: { withAnimation(.snappy) { showComments = true } },
                            onSearch: { showSearch = true },
                            onAuthor: { authorTarget = item.author },
                            onSavePosition: { resume[item.id] = $0; saveSession() },
@@ -2435,6 +2465,7 @@ struct DYVideoPage: View {
     }
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.dyClearScreen) private var clearScreen
     let item: DYAweme
     let isCurrent: Bool
     /// 紧邻当前条的下一条：提前建播放器并预滚，滑到时直接 play()
@@ -2445,7 +2476,6 @@ struct DYVideoPage: View {
     let collected: Bool
     let onLike: () -> Void
     let onCollect: () -> Void
-    let onDoubleTap: () -> Void
     let onComments: () -> Void
     let onSearch: () -> Void
     let onAuthor: () -> Void
@@ -2461,7 +2491,7 @@ struct DYVideoPage: View {
     var onEnded: (() -> Void)? = nil
     var onBack: (() -> Void)? = nil
     @AppStorage("douyin_autoplay_v1") private var autoNext = false
-    @State private var heart = false
+    @State private var pressHeld = false
     @State private var danmaku: [DYDanmaku] = []
     @State private var danmakuLoaded = false
     @State private var saving = false
@@ -2479,14 +2509,14 @@ struct DYVideoPage: View {
     @StateObject private var boost = DYBoostControl()
 
     init(item: DYAweme, isCurrent: Bool, isNext: Bool = false, insets: EdgeInsets, resume: Double?, liked: Bool, collected: Bool,
-         onLike: @escaping () -> Void, onCollect: @escaping () -> Void, onDoubleTap: @escaping () -> Void,
+         onLike: @escaping () -> Void, onCollect: @escaping () -> Void,
          onComments: @escaping () -> Void, onSearch: @escaping () -> Void, onAuthor: @escaping () -> Void, onSavePosition: @escaping (Double) -> Void,
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil, moreExtras: AnyView = AnyView(EmptyView()),
          onEnded: (() -> Void)? = nil, onBack: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.isNext = isNext; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
-        self.onLike = onLike; self.onCollect = onCollect; self.onDoubleTap = onDoubleTap
+        self.onLike = onLike; self.onCollect = onCollect
         self.onComments = onComments; self.onSearch = onSearch; self.onAuthor = onAuthor; self.onSavePosition = onSavePosition
         self.preloader = preloader; self.bridge = bridge; self.onToast = onToast
         self.onDislike = onDislike
@@ -2507,11 +2537,7 @@ struct DYVideoPage: View {
                                     resumePosition: resume, compactChrome: true,
                                     preparedPlayer: { preloader.take(item.id) },
                                     onEnded: autoNext ? onEnded : nil,
-                                    onDoubleTap: {
-                                        onDoubleTap()
-                                        heart = true
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { heart = false }
-                                    },
+                                    onDoubleTap: onComments,
                                     onSavePosition: onSavePosition, onClose: {}, fillWidth: autoFit,
                                     danmaku: danmakuOn ? danmaku : [],
                                     altURL: item.playAlt.flatMap(URL.init(string:)),
@@ -2531,35 +2557,30 @@ struct DYVideoPage: View {
                 .tabViewStyle(.page(indexDisplayMode: .always))
             }
 
-            if heart {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: theme.typography.pointSize(.splash)))
-                    .scaleEffect(1.7)
-                    .foregroundStyle(theme.status.danger.color(for: scheme))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.scale.combined(with: .opacity))
-                    .allowsHitTesting(false)
-            }
-
             if chromeMode.usesRail {
                 // 简洁 / 极简：整组按钮跟着系统侧栏边缘走（PR #12）
                 DYAdaptiveActionRail { edge in
                     HStack(alignment: .bottom, spacing: 12) {
                         if edge == .leading { actionRail(fg, edge: edge) }
-                        if !chromeMode.hidesInfo || (isCurrent && peek.on) { info(fg).transition(.opacity) }
+                        if clearScreen.wrappedValue || !chromeMode.hidesInfo || (isCurrent && peek.on) {
+                            info(fg)
+                                .opacity(clearScreen.wrappedValue ? 0.5 : 1)
+                                .transition(.opacity)
+                        }
                         Spacer(minLength: 0)
                         if edge == .trailing { actionRail(fg, edge: edge) }
                     }
                     .padding(.horizontal, chromeSidePadding)
                     .padding(.bottom, max(insets.bottom, 18) + (item.images.isEmpty ? 36 : 24))
                 }
-                // 长按加速时淡出按钮和信息，画面干净；不禁用点击区，手指按在按钮上也能继续加速。
-                .opacity(boost.boosting ? 0 : 1)
-                .animation(.easeOut(duration: 0.15), value: boost.boosting)
+                .opacity(pressHeld ? 0 : 1)
+                .accessibilityHidden(pressHeld)
+                .animation(.easeOut(duration: 0.15), value: pressHeld)
             } else {
-                // 默认：PR #12 之前的布局，左下信息 + 右侧按钮栏
+                // 默认：左下信息 + 右侧按钮栏，清屏时保留半透明信息和退出按钮。
                 HStack(alignment: .bottom, spacing: 12) {
                     info(fg)
+                        .opacity(clearScreen.wrappedValue ? 0.5 : 1)
                     Spacer(minLength: 0)
                     actions(fg)
                         .offset(x: DYDuoMetrics.actionRailHorizontalOffset(
@@ -2571,17 +2592,22 @@ struct DYVideoPage: View {
                         .padding(.bottom, item.images.isEmpty ? 56 : 0)
                 }
                 .padding(.horizontal, chromeSidePadding)
-                .padding(.bottom, max(insets.bottom, 18) + (item.images.isEmpty ? 36 : 24))
-                .opacity(boost.boosting ? 0 : 1)
-                .animation(.easeOut(duration: 0.15), value: boost.boosting)
+                .padding(.bottom, max(insets.bottom, 18) + (item.images.isEmpty ? 36 : 24) - (onBack != nil && hSize == .compact ? 40 : 0))
+                .opacity(pressHeld ? 0 : 1)
+                .accessibilityHidden(pressHeld)
+                .animation(.easeOut(duration: 0.15), value: pressHeld)
             }
         }
         .overlay(alignment: .bottom) {
-            if showDanmakuInput { danmakuBar.padding(.bottom, max(insets.bottom, 12) + 6) }
+            if showDanmakuInput {
+                danmakuBar.padding(.bottom, max(insets.bottom, 12) + 6)
+                    .opacity(pressHeld || clearScreen.wrappedValue ? 0 : 1)
+                    .allowsHitTesting(!pressHeld && !clearScreen.wrappedValue)
+            }
         }
         .preference(key: DYFeedRailPreference.self, value: railEntry(fg))
-        .animation(.snappy, value: heart)
-        .onChange(of: isCurrent) { _, c in if !c { showDanmakuInput = false } }
+        .onPreferenceChange(DYPlaybackPressKey.self) { pressHeld = $0 }
+        .onChange(of: isCurrent) { _, c in if !c { showDanmakuInput = false; pressHeld = false } }
         // 弹幕：轮到这条时才拉（一次拉整条视频的）
         .task(id: isCurrent) {
             guard isCurrent, !danmakuLoaded, item.images.isEmpty, let b = bridge else { return }
@@ -2733,7 +2759,16 @@ struct DYVideoPage: View {
         .padding(.horizontal, hSize == .compact ? 9 : 0)
     }
 
+    @ViewBuilder
     private func actions(_ fg: Color) -> some View {
+        if clearScreen.wrappedValue {
+            clearScreenButton(fg, dimmed: true)
+        } else {
+            actionButtons(fg)
+        }
+    }
+
+    private func actionButtons(_ fg: Color) -> some View {
         VStack(spacing: theme.media.actionGroupSpacing) {
             if let onBack {
                 Button(action: onBack) {
@@ -2741,9 +2776,12 @@ struct DYVideoPage: View {
                         .font(.title2.weight(.medium))
                         .foregroundStyle(fg)
                         .frame(width: 50, height: 50)
+                        .contentShape(Circle())
+                        .ddGlassCircle()
+                        .frame(width: actionColumnWidth)
                 }
                 .buttonStyle(.plain)
-                .ddGlassCapsule()
+                .modifier(DYHoldBoost(control: boost))
                 .accessibilityLabel("返回上一层")
                 .accessibilityIdentifier("douyin.list.back")
             }
@@ -2771,8 +2809,32 @@ struct DYVideoPage: View {
             .ddGlassCapsule()
             .frame(width: actionColumnWidth)
             moreMenu(fg)
+            clearScreenButton(fg)
         }
         .themeShadow(.mediaLabel)
+    }
+
+    private func clearScreenButton(_ fg: Color, dimmed: Bool = false) -> some View {
+        Button {
+            guard !boost.blocksTap else { return }
+            clearScreen.wrappedValue.toggle()
+            showDanmakuInput = false
+            danmakuFocused = false
+        } label: {
+            Image(systemName: clearScreen.wrappedValue ? "rectangle.inset.filled" : "rectangle")
+                .font(.title2.weight(.medium))
+                .foregroundStyle(fg)
+                .frame(width: 50, height: 50)
+                .contentShape(Circle())
+                .ddGlassCircle()
+                .frame(width: actionColumnWidth)
+                .opacity(dimmed ? 0.5 : 1)
+        }
+        .buttonStyle(.plain)
+        .modifier(DYHoldBoost(control: boost))
+        .allowsHitTesting(true)
+        .accessibilityLabel(clearScreen.wrappedValue ? "退出清屏" : "清屏")
+        .accessibilityIdentifier("douyin.clearScreen")
     }
 
     private func railItem(_ icon: String, _ text: String, tint: Color, _ id: String, _ act: @escaping () -> Void) -> some View {

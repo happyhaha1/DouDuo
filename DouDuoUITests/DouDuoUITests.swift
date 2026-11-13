@@ -1094,7 +1094,8 @@ final class DouDuoUITests: XCTestCase {
         let playerBack = app.buttons["douyin.list.back"].firstMatch
         XCTAssertTrue(playerBack.waitForExistence(timeout: 25))
         let like = app.buttons.matching(identifier: "douyin.like").allElementsBoundByIndex.first { $0.isHittable }
-        if let like { XCTAssertLessThan(playerBack.frame.midY, like.frame.midY) }
+        XCTAssertGreaterThan(playerBack.frame.midX, app.frame.midX)
+        if let like { XCTAssertGreaterThan(playerBack.frame.midY, like.frame.midY) }
         attach(app, "notice-video-return-above-like")
         playerBack.tap()
         XCTAssertTrue(video.waitForExistence(timeout: 10))

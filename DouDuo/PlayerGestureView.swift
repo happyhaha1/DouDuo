@@ -1,123 +1,181 @@
 import SwiftUI
 import UIKit
 
-// MARK: - UIKit 手势宿主：单击/双击/长按 + 左缘右滑退出
-// 横滑快进已移除：进度跳转只认底部进度条（进度条自己带 DragGesture），画面上的横滑不再改进度。
-// 纯 SwiftUI 的 .gesture/.simultaneousGesture 会吞掉整段手势序列导致竖滑分页失效，
-// 所以这些手势仍下沉到 UIKit，竖滑漏给外层 ScrollView 分页切视频。
+/// 按住加速期间，由播放页向外层顶栏传递清屏状态。
+struct DYPlaybackPressKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
+extension EnvironmentValues {
+    /// 本次浏览会话的清屏开关，翻页保留；详情播放器独立持有。
+    @Entry var dyClearScreen: Binding<Bool> = .constant(false)
+}
+
+// 单击/双击留在画面层；长按挂在窗口上，并按宿主的可见区域过滤触摸，覆盖同页的操作按钮。
+// 进度条独立处理拖动，不注册全屏横滑跳转。
 struct PlayerGestureView: UIViewRepresentable {
     var onSingleTap: () -> Void
-    var onDoubleTap: (CGFloat, CGFloat) -> Void          // (触点x, 宽度)
-    var onLongPress: (Bool) -> Void                       // pressing
-    /// 小红书同款：长按 2 倍速后手指下滑一段 → 锁定 2 倍速（松手也不恢复）
+    var onDoubleTap: (CGFloat, CGFloat) -> Void
+    var onLongPress: (Bool) -> Void
     var onLongPressLock: () -> Void = {}
-    /// 长按后手指上滑一段 → 取消锁定、恢复 1 倍
     var onLongPressUnlock: () -> Void = {}
-    var onEdgeChanged: (CGFloat) -> Void = { _ in }        // 左缘右滑过程中：位移跟手
-    var onEdgeEnded: (CGFloat, CGFloat, CGFloat) -> Void = { _, _, _ in }  // 松手：(位移, 横向速度, 屏宽)
+    var enabled = true
+    var topExclusion: CGFloat = 0
+    var bottomExclusion: CGFloat = 64
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeUIView(context: Context) -> UIView {
-        let v = UIView()
-        v.backgroundColor = .clear
-        v.isUserInteractionEnabled = true
+    func makeUIView(context: Context) -> HostView {
+        let v = HostView()
         let c = context.coordinator
         c.view = v
-
-        let single = UITapGestureRecognizer(target: c, action: #selector(Coordinator.handleSingle(_:)))
-        single.numberOfTapsRequired = 1
-
-        let double = UITapGestureRecognizer(target: c, action: #selector(Coordinator.handleDouble(_:)))
-        double.numberOfTapsRequired = 2
-        single.require(toFail: double)
-
         let long = UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.handleLong(_:)))
         long.minimumPressDuration = 0.5
-        // 长按期间要能跟手指：上/下滑 50pt 才判定锁定/解锁（原来 12pt 就取消长按，导致锁不上 2 倍速）
+        // 长按期间要跟手指：上/下滑 50pt 才判定锁定/解锁，按下过程中轻微漂移不能取消长按
         long.allowableMovement = .greatestFiniteMagnitude
+        long.delegate = c
         c.long = long
 
-        // 屏幕左缘右滑退出（系统级边缘手势，只在最左 ~20pt 触发，不抢中间区域）
-        let edge = UIScreenEdgePanGestureRecognizer(target: c, action: #selector(Coordinator.handleEdge(_:)))
-        edge.edges = .left
-        c.edge = edge
-
+        let single = UITapGestureRecognizer(target: c, action: #selector(Coordinator.handleSingle(_:)))
+        let double = UITapGestureRecognizer(target: c, action: #selector(Coordinator.handleDouble(_:)))
+        double.numberOfTapsRequired = 2
+        // 长按识别成功后，这一轮触摸不会再落到暂停或双击上。
+        single.require(toFail: long)
+        double.require(toFail: long)
+        single.require(toFail: double)
         v.addGestureRecognizer(single)
         v.addGestureRecognizer(double)
-        v.addGestureRecognizer(long)
-        v.addGestureRecognizer(edge)
+        v.windowChanged = { [weak c] window in c?.attach(to: window) }
         return v
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.parent = self   // 刷新闭包，回调读到最新 @State
+    func updateUIView(_ uiView: HostView, context: Context) {
+        let c = context.coordinator
+        c.parent = self
+        if !enabled { c.finishPress() }
+        c.long?.isEnabled = enabled
     }
 
-    final class Coordinator: NSObject {
+    static func dismantleUIView(_ uiView: HostView, coordinator: Coordinator) {
+        coordinator.finishPress()
+        coordinator.attach(to: nil)
+        uiView.windowChanged = nil
+    }
+
+    final class HostView: UIView {
+        var windowChanged: ((UIWindow?) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            windowChanged?(window)
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var parent: PlayerGestureView
         weak var view: UIView?
-        weak var edge: UIScreenEdgePanGestureRecognizer?
-        weak var long: UILongPressGestureRecognizer?
+        var long: UILongPressGestureRecognizer?
         private var pressStartY: CGFloat = 0
         private var pressLocked = false
+        private var pressing = false
         /// 长按（加速）结束的时间。松手后系统可能再补一个「单击」，会把视频误暂停，这里吞掉。
         private var lastLongEnd = Date.distantPast
         private var longActive = false
         private weak var frozenScroll: UIScrollView?
+        private var scrollWasEnabled = true
+        private let feedback = UIImpactFeedbackGenerator(style: .light)
+
         init(_ p: PlayerGestureView) { parent = p }
 
+        private var pagingScroll: UIScrollView? {
+            var p = view?.superview
+            while let v = p {
+                if let scroll = v as? UIScrollView { return scroll }
+                p = v.superview
+            }
+            return nil
+        }
+
+        func attach(to window: UIWindow?) {
+            guard let long, long.view !== window else { return }
+            finishPress()
+            long.view?.removeGestureRecognizer(long)
+            window?.addGestureRecognizer(long)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard parent.enabled, let view, view.window != nil else { return false }
+            let p = touch.location(in: view)
+            let region = view.bounds.inset(by: UIEdgeInsets(top: parent.topExclusion, left: 0,
+                                                           bottom: parent.bottomExclusion, right: 0))
+            guard region.contains(p) else { return false }
+            // 窗口上还有评论面板、顶栏等兄弟层；只接收视频分页容器里的触摸。
+            if let scroll = pagingScroll, let target = touch.view, !target.isDescendant(of: scroll) { return false }
+            // 弹幕输入/键盘等编辑控件保持自己的交互。
+            var target = touch.view
+            while let v = target {
+                if v is UITextField || v is UITextView { return false }
+                target = v.superview
+            }
+            feedback.prepare()
+            return true
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            // SwiftUI 按钮也用手势追踪按下；让它等待长按失败，按住加速后松手不会点击按钮。
+            // 分页的 Pan 不等待长按，正常竖滑可以立即切视频。
+            gestureRecognizer === long && !(other is UIPanGestureRecognizer)
+        }
+
         @objc func handleSingle(_ g: UITapGestureRecognizer) {
+            // 长按松手后系统可能再补一个「单击」，会把视频误暂停，这里吞掉。
             if longActive || Date().timeIntervalSince(lastLongEnd) < 0.8 { return }
-            parent.onSingleTap()
+            if parent.enabled, !pressing { parent.onSingleTap() }
         }
 
         @objc func handleDouble(_ g: UITapGestureRecognizer) {
-            guard let v = view else { return }
-            parent.onDoubleTap(g.location(in: v).x, v.bounds.width)
+            guard parent.enabled, !pressing, let view else { return }
+            parent.onDoubleTap(g.location(in: view).x, view.bounds.width)
         }
 
         @objc func handleLong(_ g: UILongPressGestureRecognizer) {
             switch g.state {
             case .began:
+                pressing = true
                 longActive = true
+                pressStartY = g.location(in: view).y
+                pressLocked = false
+                g.allowableMovement = .greatestFiniteMagnitude
+                // 只冻结当前视频所属的分页容器，清屏不会移除手势宿主。
+                if let scroll = pagingScroll {
+                    scrollWasEnabled = scroll.panGestureRecognizer.isEnabled
+                    scroll.panGestureRecognizer.isEnabled = false
+                    frozenScroll = scroll
+                }
                 parent.onLongPress(true)
-                pressStartY = g.location(in: view).y; pressLocked = false
-                // 长按期间下滑不能触发外层切视频：先把外层 ScrollView 的滑动关掉，松手再恢复
-                var p = view?.superview
-                while let x = p, !(x is UIScrollView) { p = x.superview }
-                if let sv = p as? UIScrollView { sv.panGestureRecognizer.isEnabled = false; frozenScroll = sv }
             case .changed:
                 let dy = g.location(in: view).y - pressStartY
                 if !pressLocked, abs(dy) > 50 {
                     pressLocked = true
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    feedback.impactOccurred()
                     if dy > 0 { parent.onLongPressLock() } else { parent.onLongPressUnlock() }
                 }
             case .ended, .cancelled, .failed:
-                frozenScroll?.panGestureRecognizer.isEnabled = true; frozenScroll = nil
-                pressLocked = false
-                longActive = false
-                lastLongEnd = Date()
-                parent.onLongPress(false)
+                finishPress()
             default: break
             }
         }
 
-        @objc func handleEdge(_ g: UIScreenEdgePanGestureRecognizer) {
-            guard let v = view else { return }
-            let dx = g.translation(in: v).x
-            switch g.state {
-            case .began:
-                parent.onEdgeChanged(0)
-            case .changed:
-                parent.onEdgeChanged(max(0, dx))      // 跟手位移上报给容器，画面 1:1 右移
-            case .ended, .cancelled, .failed:
-                parent.onEdgeEnded(max(0, dx), g.velocity(in: v).x, v.bounds.width)
-            default: break
-            }
+        func finishPress() {
+            frozenScroll?.panGestureRecognizer.isEnabled = scrollWasEnabled
+            frozenScroll = nil
+            pressLocked = false
+            longActive = false
+            guard pressing else { return }
+            pressing = false
+            lastLongEnd = Date()
+            parent.onLongPress(false)
         }
-
-        // 底部进度条在自己的 SwiftUI DragGesture 里接管拖拽；这里不再有全屏横滑快进。
     }
 }

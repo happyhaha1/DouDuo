@@ -782,6 +782,10 @@ struct DYListPlayer: View {
     @State private var showComments = false
     @State private var toast: String?
     @State private var loadingMore = false
+    @State private var playbackPressHeld = false
+    @State private var clearScreen = false
+    /// 左缘右滑退出的跟手位移
+    @State private var backDrag: CGFloat = 0
     /// 从消息点评论进来：自动开评论区并定位那条评论
     let commentFocus: DYCommentFocus?
 
@@ -811,7 +815,6 @@ struct DYListPlayer: View {
                             DYVideoPage(item: item, isCurrent: item.id == currentID, insets: geo.safeAreaInsets,
                                         resume: resume[item.id], liked: liked.contains(item.id), collected: collected.contains(item.id),
                                         onLike: { toggleLike(item.id, force: nil) }, onCollect: { toggleCollect(item.id) },
-                                        onDoubleTap: { toggleLike(item.id, force: true) },
                                         onComments: { showComments = true },
                                         onSearch: {},
                                         onAuthor: { onAuthor(item) },
@@ -837,6 +840,30 @@ struct DYListPlayer: View {
                         .allowsHitTesting(false)
                 }
             }
+            // 左缘右滑退出：全屏播放器没有系统的交互式返回，这里自己做跟手位移。
+            // SwiftUI 的 DragGesture 收不到视频层（UIKit 承载）上的起手，用一条贴合左缘的 UIPan 捕获条。
+            .offset(x: backDrag)
+            .overlay(alignment: .leading) {
+                if !showComments {
+                    DDBackSwipeCatcher(
+                        onChanged: { dx, dy in
+                            guard dx > 0, abs(dx) > abs(dy) else { return }
+                            backDrag = dx
+                        },
+                        onEnded: { dx, vx in
+                            let w = max(geo.size.width, 1)
+                            if backDrag > w * 0.25 || vx > 900 || dx > w * 0.45 {
+                                backDrag = 0
+                                dismiss()
+                            } else {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { backDrag = 0 }
+                            }
+                        }
+                    )
+                    .frame(width: 24)
+                    .padding(.bottom, max(geo.safeAreaInsets.bottom, 18) + 72)
+                }
+            }
             .sheet(isPresented: $showComments) {
                 if let cur = current {
                     DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false }, focus: commentFocus)
@@ -845,6 +872,9 @@ struct DYListPlayer: View {
                 }
             }
         }
+        .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
+        .environment(\.dyClearScreen, $clearScreen)
+        .statusBarHidden(playbackPressHeld || clearScreen)
         .onChange(of: currentID) { old, new in
             if new == nil, let old { currentID = old; return }
             guard let i = items.firstIndex(where: { $0.id == new }) else { return }
@@ -1518,7 +1548,7 @@ struct DYFollowFeed: View {
                                         resume: resume[item.id], liked: liked.contains(item.id) || item.userDigged == 1,
                                         collected: collected.contains(item.id) || item.isCollect == 1,
                                         onLike: { like(item.id, force: nil) }, onCollect: { collect(item.id) },
-                                        onDoubleTap: { like(item.id, force: true) }, onComments: { showComments = true },
+                                        onComments: { showComments = true },
                                         onSearch: {},
                                         onAuthor: { onAuthor(item) }, onSavePosition: { resume[item.id] = $0 },
                                         preloader: preloader, bridge: bridge, onToast: onToast)
@@ -1627,3 +1657,48 @@ final class DYPagedModelHolder: ObservableObject {
     }
 }
 #endif
+
+/// 左缘右滑退出的触摸捕获条：SwiftUI 的 DragGesture 在视频（UIKit 承载）上收不到起手，
+/// 这里用一条只有 24pt 宽的透明 UIView 加 UIPan，既不吃正文的手势，也能跟手驱动返回位移。
+struct DDBackSwipeCatcher: UIViewRepresentable {
+    var onChanged: (CGFloat, CGFloat) -> Void
+    var onEnded: (CGFloat, CGFloat) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        let g = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handle(_:)))
+        g.maximumNumberOfTouches = 1
+        g.cancelsTouchesInView = false
+        v.addGestureRecognizer(g)
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: DDBackSwipeCatcher
+        private var tracking = false
+        init(_ p: DDBackSwipeCatcher) { parent = p }
+
+        @objc func handle(_ g: UIPanGestureRecognizer) {
+            let t = g.translation(in: g.view)
+            switch g.state {
+            case .began:
+                tracking = true
+            case .changed:
+                guard tracking else { return }
+                parent.onChanged(t.x, t.y)
+            case .ended, .cancelled, .failed:
+                guard tracking else { return }
+                tracking = false
+                let vx = g.velocity(in: g.view).x
+                parent.onEnded(t.x, vx)
+            default:
+                break
+            }
+        }
+    }
+}

@@ -267,6 +267,7 @@ struct PlayerPage: View {
     @State private var lastNowPlaying = -10.0
     /// 静音（右下角按钮，全局记住）
     @AppStorage("douyin_muted_v1") private var muted = false
+    @Environment(\.dyClearScreen) private var clearScreen
     @Environment(\.ddScale) private var ui
 
     private var dmStress: Bool {
@@ -291,6 +292,7 @@ struct PlayerPage: View {
     @State private var lastPreviewAt: Double = 0
     @State private var holdAnchor: Double = 0
     @State private var rateBoost = false
+    @State private var pressHeld = false
     /// 设置里选的速度（全局、持久化）：所有视频都按它播
     @AppStorage("douyin_playback_rate_v1") private var playbackRate = 1.0
     /// 长按下滑锁定的 2 倍速：只锁当前这条视频，滑到下一条自动回到设置速度
@@ -379,14 +381,14 @@ struct PlayerPage: View {
             // 手势层铺满整页（含视频上下黑边）：单击 / 双击 / 长按，竖滑漏给分页（横滑不再改进度）
             if player != nil || vlc != nil { gestures }
             if seeking { seekHUD }
-            if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking {
+            if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking && !pressHeld {
                 Image(systemName: "play.fill").font(.system(size: 52 * ui)).foregroundStyle(.white.opacity(0.75))
                     .allowsHitTesting(false)
             }
             // 常驻倍速角标：只要不是 1 倍就一直显示；长按时再提示「下滑锁定 / 上滑取消」
-            if effectiveRate != 1 || rateBoost {
+            if (effectiveRate != 1 || rateBoost) && (!clearScreen.wrappedValue || pressHeld) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(rateText(effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
+                    Text(rateText(rateBoost ? 2 : effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
                         .accessibilityIdentifier("douyin.rateBadge")
                     if rateBoost {
                         Text(lockedBoost ? "上滑取消倍速" : "下滑锁定倍速")
@@ -404,8 +406,13 @@ struct PlayerPage: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if isActive && !rateBoost && !progressOnRail { progressBar.padding(.bottom, max(bottomInset, 8)) }
+            if isActive, !rateBoost, (!progressOnRail || clearScreen.wrappedValue) {
+                progressBar.padding(.bottom, max(bottomInset, 8))
+                    .opacity(pressHeld ? 0 : clearScreen.wrappedValue ? 0.5 : 1)
+                    .allowsHitTesting(!pressHeld)
+            }
         }
+        .preference(key: DYPlaybackPressKey.self, value: pressHeld && isActive)
         .onAppear {
             // 当前条和下一条都提前建播放器：下一条只预滚不出声，滑到就能直接 play()。
             // 再往后的页面不建——否则翻页前后会同时有 5–6 个 AVPlayerItem 拉同一批 CDN 地址。
@@ -416,6 +423,7 @@ struct PlayerPage: View {
             DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() })
         }
         .onDisappear {
+            pressHeld = false
             DDPlayback.shared.unregister(playbackID)
             teardown()
         }
@@ -456,7 +464,7 @@ struct PlayerPage: View {
             if vlc == nil, isPlaying, !rateBoost { seamAudio.setRate(Float(effectiveRate)) }
         }
         .onChange(of: isActive) { _, active in
-            if !active { lockedBoost = false }   // 滑走就解锁：只锁「当前这条」
+            if !active { lockedBoost = false; pressHeld = false; rateBoost = false }
             if active { bindRemote() }
             if let v = vlc {
                 if active { v.mediaPlayer.audio?.isMuted = muted; v.mediaPlayer.play(); isPlaying = true }
@@ -498,7 +506,9 @@ struct PlayerPage: View {
 
     /// 长按加速开始/结束。手势层和右侧按钮（DYBoostControl）共用。
     private func handleLongPress(_ pressing: Bool) {
-        if pressing && !rateBoost { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        // 清屏壳（DYPlaybackPressKey）跟着长按走：画面长按和右侧按钮都从这里进。
+        pressHeld = pressing
+        if pressing && !rateBoost { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         if let v = vlc {
             if pressing { v.setRate(2); rateBoost = true } else if rateBoost { v.setRate(Float(effectiveRate)); rateBoost = false }
             return
@@ -524,9 +534,13 @@ struct PlayerPage: View {
             // 上滑：立刻取消倍速，回到设置里的速度
             onLongPressUnlock: {
                 lockedBoost = false; rateBoost = false
+                pressHeld = false
                 if let v = vlc { v.setRate(Float(liveRate)) }
                 else if isPlaying { seamAudio.setRate(Float(liveRate)) } else { seamAudio.pause() }
-            }
+            },
+            enabled: isActive,
+            topExclusion: max(topInset, 32),
+            bottomExclusion: max(bottomInset, 8) + 36 * ui
         )
     }
 
