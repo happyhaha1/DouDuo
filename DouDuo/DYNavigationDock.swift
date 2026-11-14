@@ -15,7 +15,10 @@ struct DYSystemTabBar: ViewModifier {
             content.toolbarVisibility(hidden ? .hidden : .visible, for: .tabBar)
                 .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
                 .toolbarBackgroundVisibility(.hidden, for: .bottomBar)
+                // 内屏展开态冷启动时，系统会把底部选择器先折叠成小胶囊，
+                // 要等一次交互才恢复；两种最小化接口都钉成 never。
                 .tabBarMinimizeBehavior(.never)
+                .toolbarMinimizationBehavior(.never, for: .tabBar)
         } else { content }
     }
 }

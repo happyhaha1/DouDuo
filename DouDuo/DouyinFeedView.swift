@@ -3127,11 +3127,7 @@ struct DYClassicFeedScreen: View {
                         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                         .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .scrollEdgeEffectHidden(true, for: .all)
-                        // Hide the underlying native selector for compact
-                        // sheets too, so dismissing comments does not restore
-                        // a previously expanded tab picker over the video rail.
-                        // 评论区/UP 主页展开时不再收掉底部导航：展开内屏启动时面板默认常驻，
-                        // 旧条件会让导航条一直消失，折叠后再展开才恢复。
+                        // 评论区/UP 主页常驻时保留底部导航；只在清屏、直播、UP 主页跳转时收起。
                         .modifier(DYSystemTabBar(hidden: cleanScreen || liveRoomOpen || authorTarget != nil))
                 }
                 .tint(nil)
@@ -3141,6 +3137,7 @@ struct DYClassicFeedScreen: View {
         // existing default tint; explicitly styled buttons keep their colors.
         .tint(theme.accent.color(for: scheme))
         .toolbarVisibility(.visible, for: .statusBar)
+        // 底部导航的最小化策略由 DYSystemTabBar 统一钉住，TabView 本身不再改可见性。
         .onChange(of: mainTab) { _, selected in
             saveSession()
             if selected != .home { DDPlayback.shared.pauseAll(reason: .cover) }
