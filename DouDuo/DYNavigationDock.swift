@@ -13,6 +13,9 @@ struct DYSystemTabBar: ViewModifier {
     @ViewBuilder func body(content: Content) -> some View {
         if #available(iOS 27.1, *), mode == DDChromeMode.duoClassic.rawValue {
             content.toolbarVisibility(hidden ? .hidden : .visible, for: .tabBar)
+                // 展开内屏冷启动时纵向空间还没量准，prefersToolbarItems 会让
+                // 系统先压掉标签栏、只留工具栏按钮，等一次交互才恢复；
+                // 因此互动胶囊必须留在列里，压缩时也不许整列为空。
                 .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
                 .toolbarBackgroundVisibility(.hidden, for: .bottomBar)
                 // 内屏展开态冷启动时，系统会把底部选择器先折叠成小胶囊，
@@ -82,6 +85,9 @@ struct DYCleanScreenButton: View {
 struct DYNativeVideoActions: View {
     @Environment(\.toolbarVerticalEdge) private var verticalEdge
     let actions: DYVideoToolbarActions?
+    /// 评论区/UP 主页展开时只收互动胶囊；眼睛必须留在列里，
+    /// 否则整条工具栏为空，系统会把标签栏也一起收掉。
+    var hidesActions = false
     let isClean: Bool
     let onToggleClean: () -> Void
     @State private var anchorFrame: CGRect = .zero
@@ -105,8 +111,8 @@ struct DYNativeVideoActions: View {
                 }
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                .hidden(actions == nil)
-
+                // 眼睛是这条工具栏的稳定锚点：互动胶囊收起时也必须留在列里，
+                // 否则整条列为空，系统会把标签栏一起压缩掉。
                 // The stable clear-screen anchor is independent of this group's size.
                 // A new item identity invalidates the native cached fitting size.
                 ToolbarItem(id: "video-actions-\(Int(slotHeight))", placement: .bottomBar) {
@@ -122,6 +128,11 @@ struct DYNativeVideoActions: View {
                         .padding(.vertical, 5)
                         .glassEffect(.regular, in: .capsule)
                         .frame(height: slotHeight, alignment: .bottom)
+                        // 评论区常驻时内容让位但不改列高：列一空，
+                        // 冷启动时系统会把标签栏一起压掉。
+                        .opacity(hidesActions ? 0 : 1)
+                        .allowsHitTesting(!hidesActions)
+                        .accessibilityHidden(hidesActions)
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("douyin.video.actions")
                     }

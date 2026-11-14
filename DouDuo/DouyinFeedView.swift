@@ -3119,7 +3119,8 @@ struct DYClassicFeedScreen: View {
                         .environment(\.duoVisibleVideo, $visibleVideo)
                         .environment(\.duoCleanScreen, cleanScreen)
                         .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
-                            DYNativeVideoActions(actions: hidesVideoChrome ? nil : actions,
+                            DYNativeVideoActions(actions: actions,
+                                                 hidesActions: hidesVideoChrome,
                                                  isClean: cleanScreen,
                                                  onToggleClean: { cleanScreen.toggle() })
                         }
