@@ -128,11 +128,11 @@ struct DYNativeVideoActions: View {
                         .padding(.vertical, 5)
                         .glassEffect(.regular, in: .capsule)
                         .frame(height: slotHeight, alignment: .bottom)
-                        // 评论区常驻时内容让位但不改列高：列一空，
+                        // 评论区常驻、清屏时内容让位但不改列高：列一空，
                         // 冷启动时系统会把标签栏一起压掉。
-                        .opacity(hidesActions ? 0 : 1)
-                        .allowsHitTesting(!hidesActions)
-                        .accessibilityHidden(hidesActions)
+                        .opacity(hidesActions || isClean ? 0 : 1)
+                        .allowsHitTesting(!hidesActions && !isClean)
+                        .accessibilityHidden(hidesActions || isClean)
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("douyin.video.actions")
                     }
@@ -140,7 +140,7 @@ struct DYNativeVideoActions: View {
                 .sharedBackgroundVisibility(.hidden)
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                .hidden(actions == nil || verticalEdge == nil || isClean)
+                .hidden(actions == nil || verticalEdge == nil)
             }
             // Retain the last measured slot across navigation and sheets.
             // Resetting it would briefly expand the tabs on every return,

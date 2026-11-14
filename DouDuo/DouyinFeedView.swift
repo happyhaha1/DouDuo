@@ -3128,8 +3128,8 @@ struct DYClassicFeedScreen: View {
                         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                         .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .scrollEdgeEffectHidden(true, for: .all)
-                        // 评论区/UP 主页常驻时保留底部导航；只在清屏、直播、UP 主页跳转时收起。
-                        .modifier(DYSystemTabBar(hidden: cleanScreen || liveRoomOpen || authorTarget != nil))
+                        // 底部导航只随直播房间收起；清屏、评论区、UP 主页都不再收，冷启动与折叠/展开切换时保持一致。
+                        .modifier(DYSystemTabBar(hidden: liveRoomOpen))
                 }
                 .tint(nil)
             }

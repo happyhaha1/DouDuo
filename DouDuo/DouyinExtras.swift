@@ -1500,7 +1500,6 @@ struct DYAuthorScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.author.panel")
         .navigationBarBackButtonHidden()
-        .toolbar(.hidden, for: .tabBar)
         .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {

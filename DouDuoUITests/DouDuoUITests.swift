@@ -1209,6 +1209,8 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertTrue(clean.waitForExistence(timeout: 10), "\(mode) 应有清屏按钮")
             XCTAssertTrue(clean.isHittable, "\(mode) 清屏按钮应可点")
             let resting = clean.frame
+            // 只有本来就有系统标签栏的档位（Duo 经典）才要验证清屏之后它还在。
+            let navBefore = app.buttons["首页"].firstMatch.exists
             attach(app, "clean-off-\(mode)")
             clean.tap()
             // 点完要重新取一次快照，旧句柄的 label 不会自己刷新。
@@ -1217,6 +1219,10 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertEqual(exit.frame.minX, resting.minX, accuracy: 1, "\(mode) 清屏后按钮横向位移")
             XCTAssertEqual(exit.frame.minY, resting.minY, accuracy: 1, "\(mode) 清屏后按钮纵向位移")
             attach(app, "clean-on-\(mode)")
+            // 清屏只收顶栏/侧栏/页码环，底部导航不该被收走（系统收起/展开有动画，要等它回来）。
+            if navBefore {
+                XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 10), "\(mode) 清屏时底部导航仍在")
+            }
             app.buttons["douyin.cleanScreen"].firstMatch.tap()
             XCTAssertTrue(wait(label: "清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
                           "\(mode) 再点一次应恢复")
@@ -1251,6 +1257,13 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["首页"].exists && app.buttons["首页"].isHittable, "评论区常驻时底部导航应在")
         XCTAssertTrue(app.buttons["我的"].exists, "底部导航其余项也应在")
         attach(app, "classic-resident-nav")
+        let author = app.buttons.matching(identifier: "douyin.author").firstMatch
+        if author.exists, author.isHittable {
+            author.tap()
+            XCTAssertTrue(app.buttons["首页"].waitForExistence(timeout: 10) && app.buttons["首页"].isHittable,
+                          "UP 主页占满面板时底部导航仍应在")
+            attach(app, "classic-author-nav")
+        }
     }
 
     func testChromeModeRailMovesSearchIntoModuleMenu() throws {
