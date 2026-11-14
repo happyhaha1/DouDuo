@@ -1248,6 +1248,8 @@ private struct DYFeedHostFrameKey: PreferenceKey {
 extension EnvironmentValues {
     @Entry var duoSystemBars = false
     @Entry var duoInlineVideoNavigation = false
+    /// 互动列现在由经典页自己绘制，调用方用它临时收起整列（评论面板/直播/作者页占用时）。
+    @Entry var duoRailHidden = false
     @Entry var duoContentInsets = EdgeInsets()
     @Entry var duoVisibleVideo: Binding<DYAweme?> = .constant(nil)
     @Entry var duoCleanScreen = false
@@ -2886,13 +2888,27 @@ struct DYClassicFeedScreen: View {
     private var sidePanelOpen: Bool { residentComments || (supportsSidePanel && (authorTarget != nil || showComments)) }
     private var hidesVideoChrome: Bool { showComments || residentComments || authorTarget != nil || liveRoomOpen }
     private var headerTopInset: CGFloat {
-        // NavigationStack's inset includes a horizontal toolbar after rotation.
-        // The fixed video header needs only the physical window's safe area.
-        let physicalTop = UIApplication.shared.connectedScenes
+        // The fixed video header rides the status-bar row: the导航栏里的清屏眼睛
+        // must not push 更多/关注/推荐/直播/搜索 down. Only the status bar counts,
+        // never the NavigationStack or toolbar geometry.
+        let statusTop = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows).first(where: \.isKeyWindow)?.safeAreaInsets.top ?? 0
-        return max(physicalTop, 8)
+            .compactMap { $0.statusBarManager?.statusBarFrame.height }
+            .max() ?? 0
+        return max(statusTop, 8)
     }
+    /// 内屏竖屏按 Apple「Designing for iPhone Duo」保留标准横向栏：此时经典页
+    /// 自己的顶栏（更多/关注/推荐/直播/搜索）已经独占一行，再叠一条导航栏只会把
+    /// 清屏眼睛塞进那一行。横向栏不需要锚点，眼睛只在横屏的纵向栏里出现。
+    private var innerPortrait: Bool {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first(where: \.isKeyWindow) else { return false }
+        let size = window.bounds.size
+        return size.width > 600 && size.width < 700 && size.height > size.width
+    }
+
 
     private var currentIndex: Int? { currentID.flatMap { id in feed.items.firstIndex { $0.id == id } } }
     private var current: DYAweme? { currentIndex.map { feed.items[$0] } }
@@ -3150,13 +3166,12 @@ struct DYClassicFeedScreen: View {
                 .environment(\.duoInlineVideoNavigation, sidePanelOpen)
                 .environment(\.duoVisibleVideo, $visibleVideo)
                 .environment(\.duoCleanScreen, cleanScreen)
-                .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
-                    DYNativeVideoActions(actions: actions,
-                                         hidesActions: hidesVideoChrome,
-                                         isClean: cleanScreen,
+                .environment(\.duoRailHidden, hidesVideoChrome)
+                .overlay {
+                    DYNativeVideoActions(isClean: cleanScreen,
                                          onToggleClean: { cleanScreen.toggle() })
                 }
-                .toolbarVisibility(liveRoomOpen ? .hidden : .visible, for: .navigationBar)
+                .toolbarVisibility(liveRoomOpen || innerPortrait ? .hidden : .visible, for: .navigationBar)
                 .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                 .toolbarMinimizationBehavior(.never, for: .navigationBar)
                 .scrollEdgeEffectHidden(true, for: .all)
@@ -4270,9 +4285,11 @@ struct DYClassicVideoPage: View {
     @Environment(\.duoSystemBars) private var systemBars
     @Environment(\.toolbarVerticalEdge) private var verticalBarEdge
     @Environment(\.duoInlineVideoNavigation) private var inlineNavigation
+    @Environment(\.duoRailHidden) private var railHidden
     @Environment(\.displayScale) private var displayScale
     @Environment(\.duoVisibleVideo) private var visibleVideo
     @Environment(\.horizontalSizeClass) private var hSize
+    @ObservedObject private var toolbarAnchor = DYToolbarAnchor.shared
     private var railWidth: CGFloat { hSize == .compact ? 50 : 54 }
     private var chromeSidePadding: CGFloat { 12 }
     // Full-bleed ancestors may report zero safe-area insets. Read the app's
@@ -4451,15 +4468,27 @@ struct DYClassicVideoPage: View {
                     .padding(.bottom, DYDuoMetrics.mediaBottomPadding(mediaBottomInset) + (item.images.isEmpty ? 16 * ui : 16))
             }
         }
-        .overlay(alignment: .trailing) {
-            if !cleanScreen && !inlineNavigation && (!systemBars || verticalBarEdge == nil) {
-                actionCapsule(fg)
-                    .modifier(DYRailReservedNudge())
-                    .padding(.trailing, actionRailTrailingPadding)
+        // 系统把工具栏竖起来时，自定义视图不会被纵向呈现，只会被折进溢出菜单
+        // （眼睛下面那颗 More）。所以互动列由这一页自己画，只借用眼睛的锚点，
+        // 贴在它下方；横向栏时仍保持原来的垂直居中。
+        .overlay {
+            if !cleanScreen && !inlineNavigation && !railHidden {
+                GeometryReader { proxy in
+                    let verticalRail = systemBars && verticalBarEdge != nil
+                    let pageTop = proxy.frame(in: .global).minY
+                    let anchorBottom = toolbarAnchor.frame.maxY
+                    let topInset = verticalRail && anchorBottom > 0
+                        ? max(chromeSidePadding, anchorBottom + 6 - pageTop)
+                        : 0
+                    actionCapsule(fg)
+                        .modifier(DYRailReservedNudge())
+                        .padding(.trailing, actionRailTrailingPadding)
+                        .padding(.top, topInset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: verticalRail ? .topTrailing : .trailing)
+                }
             }
         }
-        .preference(key: DYActiveVideoActionsKey.self,
-                    value: systemBars && isCurrent && !inlineNavigation ? toolbarActions(fg) : nil)
         .overlay(alignment: .bottom) {
             if showDanmakuInput { danmakuBar.padding(.bottom, max(insets.bottom, 0) + 4) }
         }
@@ -4626,18 +4655,6 @@ struct DYClassicVideoPage: View {
             .glassEffect(.regular, in: .capsule)
     }
 
-    private func toolbarActions(_ fg: Color) -> DYVideoToolbarActions {
-        DYVideoToolbarActions(
-            avatarImage: authorImage.map(circularAvatar), authorName: item.author.name,
-            onAuthor: onAuthor, follow: followBadge,
-            like: AnyView(railItem(liked ? "heart.fill" : "heart", DYFormat.count(item.stats.digg + (liked ? 1 : 0)),
-                                  tint: liked ? theme.status.danger.color(for: scheme) : fg, "douyin.like", onLike)),
-            comments: AnyView(railItem("ellipsis.bubble", DYFormat.count(item.stats.comment), tint: fg, "douyin.comments", onComments)),
-            collect: AnyView(railItem(collected ? "star.fill" : "star", DYFormat.count(item.stats.collect + (collected ? 1 : 0)),
-                                     tint: collected ? theme.status.warning.color(for: scheme) : fg, "douyin.collect", onCollect)),
-            share: AnyView(railItem("arrowshape.turn.up.right", DYFormat.count(item.stats.share), tint: fg, "douyin.share") { showShare = true })
-        )
-    }
 
     private func circularAvatar(_ image: UIImage) -> UIImage {
         let format = UIGraphicsImageRendererFormat()

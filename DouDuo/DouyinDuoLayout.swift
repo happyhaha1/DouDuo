@@ -525,9 +525,10 @@ struct DYCommentPlayerLayout<Video: View>: View {
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 .background(Color.black.ignoresSafeArea())
-                .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
+                .environment(\.duoRailHidden, showComments || layout.showsPane)
+                .overlay {
                     if #available(iOS 27.1, *), chromeModeRaw == DDChromeMode.duoClassic.rawValue {
-                        DYStandaloneVideoActions(actions: showComments || layout.showsPane ? nil : actions, onBack: onBack)
+                        DYStandaloneVideoActions(onBack: onBack)
                     }
                 }
                 .modifier(DYStandaloneBarPolicy(classic: chromeModeRaw == DDChromeMode.duoClassic.rawValue))

@@ -23,26 +23,17 @@ struct DYSystemTabBar: ViewModifier {
     }
 }
 
-/// The current video supplies its existing controls and callbacks; moving
-/// these views into the toolbar must not create another player or data model.
-struct DYActiveVideoActionsKey: PreferenceKey {
-    static var defaultValue: DYVideoToolbarActions? { nil }
+/// Where our own anchor landed inside the native vertical bar, in window
+/// coordinates. A custom view placed in a vertical toolbar is never laid out
+/// vertically — the system folds it into the overflow menu — so the classic
+/// interaction rail draws itself in the page and only needs this anchor.
+@MainActor final class DYToolbarAnchor: ObservableObject {
+    static let shared = DYToolbarAnchor()
 
-    static func reduce(value: inout DYVideoToolbarActions?, nextValue: () -> DYVideoToolbarActions?) {
-        if let next = nextValue() { value = next }
-    }
+    @Published var frame: CGRect = .zero
+    @Published var windowHeight: CGFloat = 0
 }
 
-struct DYVideoToolbarActions {
-    let avatarImage: UIImage?
-    let authorName: String
-    let onAuthor: () -> Void
-    let follow: AnyView?
-    let like: AnyView
-    let comments: AnyView
-    let collect: AnyView
-    let share: AnyView
-}
 
 /// 经典布局在系统工具栏里画的那颗清屏按钮。经典以外的三种布局复用同一份实现，
 /// 样式、无障碍标签和点击面积与经典完全一致。
@@ -80,19 +71,8 @@ struct DYCleanScreenButton: View {
 
 @available(iOS 27.1, *)
 struct DYNativeVideoActions: View {
-    @Environment(\.toolbarVerticalEdge) private var verticalEdge
-    let actions: DYVideoToolbarActions?
-    /// 评论区/UP 主页展开时只收互动胶囊；眼睛必须留在列里，
-    /// 否则整条工具栏为空，系统会把标签栏也一起收掉。
-    var hidesActions = false
     let isClean: Bool
     let onToggleClean: () -> Void
-    @State private var anchorFrame: CGRect = .zero
-    @State private var windowHeight: CGFloat = 0
-    private var slotHeight: CGFloat {
-        guard !anchorFrame.isEmpty else { return 262 }
-        return max(262, (windowHeight - anchorFrame.maxY - 112).rounded(.down))
-    }
 
     var body: some View {
         Color.clear.frame(width: 0, height: 0).allowsHitTesting(false)
@@ -100,56 +80,22 @@ struct DYNativeVideoActions: View {
                 ToolbarItem(placement: .primaryAction) {
                     DYCleanScreenButton(isClean: isClean, action: onToggleClean)
                         .background(DYToolbarFrameReader { frame, height in
-                            withTransaction(Transaction(animation: nil)) {
-                                anchorFrame = frame
-                                windowHeight = height
-                            }
+                            let anchor = DYToolbarAnchor.shared
+                            guard anchor.frame != frame || anchor.windowHeight != height else { return }
+                            anchor.frame = frame
+                            anchor.windowHeight = height
                         })
                 }
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                // 眼睛是这条工具栏的稳定锚点：互动胶囊收起时也必须留在列里，
-                // 否则整条列为空，系统会把标签栏一起压缩掉。
-                // The stable clear-screen anchor is independent of this group's size.
-                // A new item identity invalidates the native cached fitting size.
-                ToolbarItem(id: "video-actions-\(Int(slotHeight))", placement: .bottomBar) {
-                    if verticalEdge != nil, let actions {
-                        VStack(spacing: 4) {
-                            DYAuthorAvatarControl(image: actions.avatarImage, name: actions.authorName,
-                                                  onAuthor: actions.onAuthor, follow: actions.follow)
-                            actions.like
-                            actions.comments
-                            actions.collect
-                            actions.share
-                        }
-                        .padding(.vertical, 5)
-                        .glassEffect(.regular, in: .capsule)
-                        .frame(height: slotHeight, alignment: .bottom)
-                        // 评论区常驻、清屏时内容让位但不改列高：列一空，
-                        // 冷启动时系统会把标签栏一起压掉。
-                        .opacity(hidesActions || isClean ? 0 : 1)
-                        .allowsHitTesting(!hidesActions && !isClean)
-                        .accessibilityHidden(hidesActions || isClean)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("douyin.video.actions")
-                    }
-                }
-                .sharedBackgroundVisibility(.hidden)
-                .axisBehavior(.verticalPreferred)
-                .visibilityPriority(.high)
-                .hidden(actions == nil || verticalEdge == nil)
+                // 眼睛是这条工具栏唯一的稳定锚点：常驻纵向栏里，
+                // 系统才不会把标签栏一起压缩掉。
             }
-            // Retain the last measured slot across navigation and sheets.
-            // Resetting it would briefly expand the tabs on every return,
-            // until the system lays out the anchor again.
     }
 }
-/// Standalone works have no tab selector. Keep Back separate from the compact
-/// interaction capsule, so the system never turns the video actions into More.
+/// Standalone works have no tab selector, so only Back lives in the bar.
 @available(iOS 27.1, *)
 struct DYStandaloneVideoActions: View {
-    @Environment(\.toolbarVerticalEdge) private var verticalEdge
-    let actions: DYVideoToolbarActions?
     let onBack: () -> Void
 
     var body: some View {
@@ -163,29 +109,10 @@ struct DYStandaloneVideoActions: View {
                 }
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                ToolbarItem(placement: .bottomBar) {
-                    if let actions {
-                        VStack(spacing: 4) {
-                            DYAuthorAvatarControl(image: actions.avatarImage, name: actions.authorName,
-                                                  onAuthor: actions.onAuthor, follow: actions.follow)
-                            actions.like
-                            actions.comments
-                            actions.collect
-                            actions.share
-                        }
-                        .padding(.vertical, 5)
-                        .glassEffect(.regular, in: .capsule)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("douyin.video.actions")
-                    }
-                }
-                .sharedBackgroundVisibility(.hidden)
-                .axisBehavior(.verticalPreferred)
-                .visibilityPriority(.high)
-                .hidden(actions == nil || verticalEdge == nil)
             }
     }
 }
+
 
 /// Keep the same avatar footprint before and after following, so changing
 /// relationship state cannot resize the native toolbar or its collapsed tabs.
