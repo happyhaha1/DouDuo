@@ -2830,6 +2830,7 @@ extension EnvironmentValues {
 struct DYClassicFeedScreen: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
+    @State private var shellWidth: CGFloat = 0
     @StateObject private var bridge = DouyinBridge()
     @StateObject private var feed = DYFeedModel()
     @State private var insets = EdgeInsets()
@@ -3119,6 +3120,9 @@ struct DYClassicFeedScreen: View {
             .badge(noticeUnread)
             Tab("首页", systemImage: "house", value: DYMainTab.home) {
                 NavigationStack { homeContent }
+                    // 标签栏可见性必须挂在页面内容这一层：挂在 TabView 上对
+                    // 系统标签栏不生效（实测仍渲染并可点）。
+                    .modifier(DYSystemTabBar(hidden: hidesTabBar))
                     .tint(nil)
             }
         }
@@ -3126,6 +3130,7 @@ struct DYClassicFeedScreen: View {
         // existing default tint; explicitly styled buttons keep their colors.
         .tint(theme.accent.color(for: scheme))
         .toolbarVisibility(.visible, for: .statusBar)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { shellWidth = $0 }
         // 底部导航的最小化策略由 DYSystemTabBar 统一钉住，TabView 本身不再改可见性。
         .onChange(of: mainTab) { _, selected in
             saveSession()
@@ -3133,8 +3138,15 @@ struct DYClassicFeedScreen: View {
         }
     }
 
-    /// 首页那一格：经典档位画 Duo 分栏，其余档位画原来的默认布局。
-    /// 两者共用外壳的标签栏、清屏状态和工具栏列。
+    /// 标签栏可见性：直播房间收起；默认 / 简洁 / 极简只在展开内屏（宽 ≥ 700pt）显示右侧导航，
+    /// 折叠外屏仍靠顶栏「消息 / 我的」，不会多出经典布局下面那三个按钮。
+    /// 用实测宽度而不是 horizontalSizeClass：Duo 外屏的 trait 仍报 regular。
+    private var hidesTabBar: Bool {
+        if liveRoomOpen { return true }
+        guard chromeModeRaw != DDChromeMode.duoClassic.rawValue else { return false }
+        return shellWidth < 700
+    }
+
     @ViewBuilder private var homeContent: some View {
         if chromeModeRaw == DDChromeMode.duoClassic.rawValue {
             layoutRoot
@@ -3153,12 +3165,13 @@ struct DYClassicFeedScreen: View {
                 .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                 .toolbarMinimizationBehavior(.never, for: .navigationBar)
                 .scrollEdgeEffectHidden(true, for: .all)
-                // 底部导航只随直播房间收起；清屏、评论区、UP 主页都不再收，冷启动与折叠/展开切换时保持一致。
-                .modifier(DYSystemTabBar(hidden: liveRoomOpen))
         } else {
             DYUpstreamFeedScreen()
         }
     }
+
+    /// 首页那一格：经典档位画 Duo 分栏，其余档位画原来的默认布局。
+    /// 两者共用外壳的标签栏、清屏状态和工具栏列。
 
     @ViewBuilder
     private var layoutRoot: some View {

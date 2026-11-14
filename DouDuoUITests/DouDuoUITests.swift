@@ -1204,17 +1204,20 @@ final class DouDuoUITests: XCTestCase {
         sleep(5)
         return app
     }
-    /// 四档布局：右侧导航栏都在，清屏按钮是同一颗（经典那颗眼睛），位置一致，进出清屏都不位移。
+    /// 三档非经典布局：清屏按钮是同一颗（经典那颗眼睛），位置一致，进出清屏都不位移；
+    /// 折叠外屏不显示经典布局下面那三个标签按钮，入口仍在顶栏「消息 / 我的」。
     func testDefaultChromeModesToggleCleanScreen() throws {
         continueAfterFailure = false
-        for mode in ["classic", "rail", "minimal", "default"] {
+        for mode in ["classic", "rail", "minimal"] {
             let app = launchChrome(mode)
+            let window = app.windows.firstMatch.frame
+            XCTAssertLessThan(window.width, 700, "本用例校验折叠外屏：请先用 duoctl close 合上 Duo")
             let clean = app.buttons["douyin.cleanScreen"].firstMatch
             XCTAssertTrue(clean.waitForExistence(timeout: 10), "\(mode) 应有清屏按钮")
             XCTAssertTrue(clean.isHittable, "\(mode) 清屏按钮应可点")
             let resting = clean.frame
-            // 四档共用同一个标签外壳，右侧导航（首页 / 私信 / 我的）冷启动就该在。
-            XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 10), "\(mode) 右侧导航应在")
+            // 折叠外屏宽度是 compact：非经典档位不该多出经典布局底部那三个标签按钮。
+            XCTAssertFalse(app.buttons["首页"].firstMatch.waitForExistence(timeout: 3), "\(mode) 折叠外屏不应显示底部标签栏")
             attach(app, "clean-off-\(mode)")
             clean.tap()
             // 点完要重新取一次快照，旧句柄的 label 不会自己刷新。
@@ -1223,8 +1226,8 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertEqual(exit.frame.minX, resting.minX, accuracy: 1, "\(mode) 清屏后按钮横向位移")
             XCTAssertEqual(exit.frame.minY, resting.minY, accuracy: 1, "\(mode) 清屏后按钮纵向位移")
             attach(app, "clean-on-\(mode)")
-            // 清屏只收顶栏/侧栏/页码环，右侧导航不该被收走（系统动画期间要等它回来）。
-            XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 10), "\(mode) 清屏时右侧导航仍在")
+            // 清屏只收顶栏/侧栏/页码环；折叠外屏本来就没有底部标签栏，清屏后也不该冒出来。
+            XCTAssertFalse(app.buttons["首页"].firstMatch.waitForExistence(timeout: 3), "\(mode) 清屏时不应出现底部标签栏")
             app.buttons["douyin.cleanScreen"].firstMatch.tap()
             XCTAssertTrue(wait(label: "清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
                           "\(mode) 再点一次应恢复")
