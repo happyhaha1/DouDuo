@@ -1205,18 +1205,17 @@ final class DouDuoUITests: XCTestCase {
         return app
     }
     /// 三档非经典布局：清屏按钮是同一颗（经典那颗眼睛），位置一致，进出清屏都不位移；
-    /// 折叠外屏不显示经典布局下面那三个标签按钮，入口仍在顶栏「消息 / 我的」。
+    /// 经典布局那三个标签按钮（首页 / 私信 / 我的）无论折叠外屏还是展开内屏都不出现，入口在顶栏「消息 / 我的」。
     func testDefaultChromeModesToggleCleanScreen() throws {
         continueAfterFailure = false
         for mode in ["classic", "rail", "minimal"] {
             let app = launchChrome(mode)
             let window = app.windows.firstMatch.frame
-            XCTAssertLessThan(window.width, 700, "本用例校验折叠外屏：请先用 duoctl close 合上 Duo")
             let clean = app.buttons["douyin.cleanScreen"].firstMatch
             XCTAssertTrue(clean.waitForExistence(timeout: 10), "\(mode) 应有清屏按钮")
             XCTAssertTrue(clean.isHittable, "\(mode) 清屏按钮应可点")
             let resting = clean.frame
-            // 折叠外屏宽度是 compact：非经典档位不该多出经典布局底部那三个标签按钮。
+            // 那三个标签只属于经典布局，非经典档位折叠外屏也不该有。
             XCTAssertFalse(app.buttons["首页"].firstMatch.waitForExistence(timeout: 3), "\(mode) 折叠外屏不应显示底部标签栏")
             attach(app, "clean-off-\(mode)")
             clean.tap()
@@ -1226,7 +1225,7 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertEqual(exit.frame.minX, resting.minX, accuracy: 1, "\(mode) 清屏后按钮横向位移")
             XCTAssertEqual(exit.frame.minY, resting.minY, accuracy: 1, "\(mode) 清屏后按钮纵向位移")
             attach(app, "clean-on-\(mode)")
-            // 清屏只收顶栏/侧栏/页码环；折叠外屏本来就没有底部标签栏，清屏后也不该冒出来。
+            // 清屏只收顶栏/侧栏/页码环，也不会让标签栏冒出来。
             XCTAssertFalse(app.buttons["首页"].firstMatch.waitForExistence(timeout: 3), "\(mode) 清屏时不应出现底部标签栏")
             app.buttons["douyin.cleanScreen"].firstMatch.tap()
             XCTAssertTrue(wait(label: "清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),

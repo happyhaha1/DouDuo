@@ -2830,7 +2830,6 @@ extension EnvironmentValues {
 struct DYClassicFeedScreen: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
-    @State private var shellWidth: CGFloat = 0
     @StateObject private var bridge = DouyinBridge()
     @StateObject private var feed = DYFeedModel()
     @State private var insets = EdgeInsets()
@@ -3130,7 +3129,6 @@ struct DYClassicFeedScreen: View {
         // existing default tint; explicitly styled buttons keep their colors.
         .tint(theme.accent.color(for: scheme))
         .toolbarVisibility(.visible, for: .statusBar)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { shellWidth = $0 }
         // 底部导航的最小化策略由 DYSystemTabBar 统一钉住，TabView 本身不再改可见性。
         .onChange(of: mainTab) { _, selected in
             saveSession()
@@ -3138,13 +3136,10 @@ struct DYClassicFeedScreen: View {
         }
     }
 
-    /// 标签栏可见性：直播房间收起；默认 / 简洁 / 极简只在展开内屏（宽 ≥ 700pt）显示右侧导航，
-    /// 折叠外屏仍靠顶栏「消息 / 我的」，不会多出经典布局下面那三个按钮。
-    /// 用实测宽度而不是 horizontalSizeClass：Duo 外屏的 trait 仍报 regular。
+    /// 标签栏可见性：直播房间收起；那三个标签只属于经典布局，
+    /// 默认 / 简洁 / 极简一律不显示（折叠外屏靠顶栏「消息 / 我的」，展开内屏也不再出现）。
     private var hidesTabBar: Bool {
-        if liveRoomOpen { return true }
-        guard chromeModeRaw != DDChromeMode.duoClassic.rawValue else { return false }
-        return shellWidth < 700
+        liveRoomOpen || chromeModeRaw != DDChromeMode.duoClassic.rawValue
     }
 
     @ViewBuilder private var homeContent: some View {
