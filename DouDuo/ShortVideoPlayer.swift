@@ -155,19 +155,24 @@ extension PlayerPage {
                          preparedPlayer: (() -> AVPlayer?)? = nil,
                          onEnded: (() -> Void)?, onDoubleTap: (() -> Void)?,
                          onSavePosition: @escaping (Double) -> Void, onClose: @escaping () -> Void,
-                         fillWidth: Bool = true, danmaku: [DYDanmaku] = [], altURL: URL? = nil,
+                         fillWidth: Bool = true, onFillWidthChange: ((Bool) -> Void)? = nil,
+                         danmaku: [DYDanmaku] = [], altURL: URL? = nil,
                          quality: String? = nil, fastURL: URL? = nil, posterURL: URL? = nil,
                          onResolution: ((Int) -> Void)? = nil,
                          videoAspect: Double = 0,
                          headEndSeconds: Double? = nil, continuationURL: URL? = nil,
-                         boost: DYBoostControl? = nil) -> PlayerPage {
+                         onSwipeLeft: (() -> Void)? = nil, onSwipeRight: (() -> Void)? = nil,
+                         onContextMenu: (() -> Void)? = nil, boost: DYBoostControl? = nil) -> PlayerPage {
         PlayerPage(id: id, url: url, knownDuration: durationSec, isActive: isActive, isNext: isNext, bottomInset: bottomInset,
                    resumePosition: resumePosition, preparedPlayer: preparedPlayer, onEnded: onEnded,
                    onDoubleTap: onDoubleTap, onSavePosition: onSavePosition, fillWidth: fillWidth,
+                   onFillWidthChange: onFillWidthChange,
                    topInset: topInset, danmaku: danmaku, altURL: altURL, quality: quality,
                    onResolution: onResolution, fastURL: fastURL, posterURL: posterURL,
                    headEndSeconds: headEndSeconds,
-                   continuationURL: continuationURL, videoAspect: videoAspect, title: title, boost: boost)
+                   continuationURL: continuationURL, videoAspect: videoAspect, title: title,
+                   navigationSwipes: onSwipeLeft != nil || onSwipeRight != nil || onContextMenu != nil, onSwipeLeft: onSwipeLeft, onSwipeRight: onSwipeRight,
+                   onContextMenu: onContextMenu, boost: boost)
     }
 }
 
@@ -198,7 +203,9 @@ extension PlayerPage {
 /// 所以由 PlayerPage 把「加速开始/结束」交给这个对象，外层控件按住时直接调用。
 @MainActor final class DYBoostControl: ObservableObject {
     /// 正在加速：外层据此淡出按钮和状态图标。
-    @Published var boosting = false
+    @Published var boosting = false {
+        didSet { if DYBoostRouter.shared.control === self { DYBoostRouter.shared.boosting = boosting } }
+    }
     var press: (Bool) -> Void = { _ in }
     private var held = false
     private var lastEnd = Date.distantPast
@@ -208,14 +215,44 @@ extension PlayerPage {
     func end() { guard held else { return }; held = false; lastEnd = Date(); press(false) }
 }
 
-/// 给按钮加「按住 0.5 秒进入加速、松手恢复」。GestureState 在松手和被系统取消时都会复位，不会卡在加速状态。
+/// 长按加速的触发时长。原来 0.5 秒，用户反馈比抖音原版慢、不跟手（issue #4），改 0.3。
+enum DYBoostTiming {
+    static let holdSeconds: Double = 0.3
+}
+
+/// 简洁/极简模式的右侧栏画在首页最外层，拿不到每一页自己的 DYBoostControl。
+/// 当前这一页把自己的控制登记到这里：根层的入口按钮按住可加速，整列按钮跟着淡出（issue #4）。
+@MainActor final class DYBoostRouter: ObservableObject {
+    static let shared = DYBoostRouter()
+    weak var control: DYBoostControl?
+    @Published var boosting = false
+    func adopt(_ c: DYBoostControl) {
+        control = c
+        if boosting != c.boosting { boosting = c.boosting }
+    }
+    func begin() { control?.begin() }
+    func end() { control?.end() }
+}
+
+/// 根层按钮列：当前页长按加速时淡出。单独订阅 DYBoostRouter，不让整页跟着重算。
+struct DDBoostFade<Content: View>: View {
+    @ObservedObject private var router = DYBoostRouter.shared
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        content()
+            .opacity(router.boosting ? 0 : 1)
+            .animation(.easeOut(duration: 0.15), value: router.boosting)
+    }
+}
+
+/// 给按钮加「按住 0.3 秒进入加速、松手恢复」。GestureState 在松手和被系统取消时都会复位，不会卡在加速状态。
 struct DYHoldBoost: ViewModifier {
     let control: DYBoostControl
     @GestureState private var holding = false
     func body(content: Content) -> some View {
         content
             .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.5)
+                LongPressGesture(minimumDuration: DYBoostTiming.holdSeconds)
                     .sequenced(before: DragGesture(minimumDistance: 0))
                     .updating($holding) { value, state, _ in
                         if case .second(true, _) = value { state = true }
@@ -225,6 +262,8 @@ struct DYHoldBoost: ViewModifier {
 }
 
 struct PlayerPage: View {
+    @Environment(\.duoCleanScreen) private var cleanScreen
+    @Environment(\.duoContentInsets) private var chromeInsets
     let id: String
     let url: URL
     let knownDuration: Double
@@ -239,6 +278,7 @@ struct PlayerPage: View {
     let onSavePosition: (Double) -> Void
     /// 竖屏时视频比屏幕窄（左右黑边）→ 放大铺满宽度；关掉则保持完整画面（上下留边）
     var fillWidth: Bool = true
+    var onFillWidthChange: ((Bool) -> Void)? = nil
     var topInset: CGFloat = 0
     /// 视频弹幕（空 = 不显示）
     var danmaku: [DYDanmaku] = []
@@ -263,6 +303,10 @@ struct PlayerPage: View {
     var videoAspect: Double = 0
     /// 锁屏 / 控制中心「正在播放」上显示的标题
     var title: String = ""
+    var navigationSwipes = false
+    var onSwipeLeft: (() -> Void)? = nil
+    var onSwipeRight: (() -> Void)? = nil
+    var onContextMenu: (() -> Void)? = nil
     var boost: DYBoostControl? = nil
     /// 简洁 / 极简模式：隐藏底部进度条，进度改画在模块入口外圈
     @AppStorage("douyin_chrome_mode_v1") private var chromeModeRaw = "classic"
@@ -292,6 +336,7 @@ struct PlayerPage: View {
     }
 
     @State private var player: AVPlayer?
+    @StateObject private var pictureInPicture = DYPictureInPicture()
     @State private var imgGen: AVAssetImageGenerator?
     @State private var duration: Double = 0
     @State private var current: Double = 0
@@ -342,66 +387,76 @@ struct PlayerPage: View {
     @State private var fastT0 = Date()
     @State private var seamAudio = DDSeamlessController()
     @State private var playbackID = UUID()
+    @State private var videoScale: CGFloat = 1
+    @State private var pinchMagnitude: CGFloat = 1
     /// 实际播放速度（含按住的临时 2 倍），交给独立音频引擎
     private var playRate: Float { rateBoost ? 2 : Float(effectiveRate) }
 
     var body: some View {
         ZStack {
             Color.black
-            if let vlc {
-                // 画面铺到屏幕边缘（状态栏/底部安全区也盖住）：跟抖音原生一样，不留上下黑边
-                VLCPlayerSurface(controller: vlc, fillWidth: fillWidth).ignoresSafeArea()
-            } else if let player {
-                // 画面层真正有帧可显示（isReadyForDisplay）就撤掉封面：预加载 / 本地缓存的视频滑过来就是真画面，
-                // 不再「先闪一下封面再播」
-                ZStack {
-                    VideoSurface(player: player, fillWidth: fillWidth, onReady: { if !firstFrame { firstFrame = true } })
-                        .ignoresSafeArea()
-                    // 头部缓存接在线流：新播放器先叠在上面亮相（已缓冲、时间点对齐），再撤掉旧的，
-                    // 避免换 AVPlayerLayer 的 player 时断帧
-                    if let np = nextPlayer {
-                        VideoSurface(player: np, fillWidth: fillWidth)
-                            .ignoresSafeArea()
-                            .opacity(nextOpacity)
-                            .allowsHitTesting(false)
+            // All playback entry points share this backdrop. Mask the player's
+            // opaque letterbox below so uncovered areas reveal the blurred cover.
+            if let posterURL {
+                GeometryReader { geometry in
+                    CachedAsyncImage(url: posterURL) { image in
+                        image.resizable().scaledToFill()
+                    } placeholder: { Color.black }
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .blur(radius: 28)
+                    .overlay(Color.black.opacity(0.25))
+                    .clipped()
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("douyin.video.backdrop")
+            }
+            videoPlane
+                .mask {
+                    GeometryReader { geometry in
+                        let size = geometry.size
+                        let screenAspect = size.width / max(size.height, 1)
+                        let aspect = videoAspect > 0 ? videoAspect : screenAspect
+                        let fills = fillWidth && ((aspect < 1) == (screenAspect < 1))
+                        let fitted = aspect > screenAspect
+                            ? CGSize(width: size.width, height: size.width / aspect)
+                            : CGSize(width: size.height * aspect, height: size.height)
+                        Rectangle()
+                            .frame(width: !fills ? fitted.width : size.width,
+                                   height: !fills ? fitted.height : size.height)
+                            .position(x: size.width / 2, y: size.height / 2)
                     }
                 }
-            } else {
-                ProgressView().tint(.white)
-            }
-            if vlc == nil, let hd = hdPlayer {
-                // 0.001 而不是 0：完全透明的层可能不出画面，换上来时会黑一下
-                VideoSurface(player: hd, fillWidth: fillWidth).ignoresSafeArea()
-                    .opacity(hdVisible ? 1 : 0.001).allowsHitTesting(false)
-            }
-            // 封面只给「还没缓存、还没出帧」的在线视频兜底；本地已缓存的直接等首帧（几十毫秒），不铺封面
-            if !firstFrame, !url.isFileURL, let posterURL {
-                GeometryReader { g in
-                    let screen = g.size.width / max(g.size.height, 1)
-                    let video = videoAspect > 0 ? videoAspect : screen
-                    let same = (video < 1) == (screen < 1)
-                    // 1600：封面原图 1080×1920，这里不是为了缩小，而是为了走 ImageCache.loadThumb →
-                    // ImageIO 在后台解码。不传这个参数时上是 UIImage(data:) 懒解码，第一帧在主线程解 ~2M 像素。
-                    CachedAsyncImage(url: posterURL, thumbnailMaxPixel: 1600) { img in
-                        img.resizable().aspectRatio(contentMode: fillWidth && same ? .fill : .fit)
-                    } placeholder: { Color.clear }
-                    .frame(width: g.size.width, height: g.size.height)
-                }
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-            }
-            if isActive && (!danmaku.isEmpty || dmStress) {
+                .scaleEffect(videoScale)
+                .allowsHitTesting(false)
+            if !cleanScreen && isActive && (!danmaku.isEmpty || dmStress) {
                 DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
             }
             // 手势层铺满整页（含视频上下黑边）：单击 / 双击 / 长按，竖滑漏给分页（横滑不再改进度）
             if player != nil || vlc != nil { gestures }
-            if seeking && seekDragging { seekHUD }
-            if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking && !pressHeld {
+            #if DEBUG
+            Text(String(format: "%.2f", videoScale)).font(.caption2).opacity(0.01)
+                .accessibilityIdentifier("douyin.video.zoom")
+                .allowsHitTesting(false)
+            Text(fillWidth ? "fill" : "fit").font(.caption2).opacity(0.01)
+                .accessibilityIdentifier("douyin.video.fitMode")
+                .allowsHitTesting(false)
+            Text("\(DYGestureDiagnostics.shared.boostStarts)").font(.caption2).opacity(0.01)
+                .accessibilityIdentifier("douyin.video.boostStarts")
+                .allowsHitTesting(false)
+            if isActive {
+                Text(!pictureInPicture.supported ? "unsupported" : pictureInPicture.active ? "active" : (pictureInPicture.canStart ? "ready" : "waiting"))
+                    .font(.caption2).opacity(0.01)
+                    .accessibilityIdentifier("douyin.video.pipState").allowsHitTesting(false)
+            }
+            #endif
+            if seeking && seekDragging && !cleanScreen { seekHUD }
+            if !cleanScreen && isActive && !isPlaying && (player != nil || vlc != nil) && !seeking && !pressHeld {
                 Image(systemName: "play.fill").font(.system(size: 52 * ui)).foregroundStyle(.white.opacity(0.75))
                     .allowsHitTesting(false)
             }
             // 常驻倍速角标：只要不是 1 倍就一直显示；长按时再提示「下滑锁定 / 上滑取消」
-            if (effectiveRate != 1 || rateBoost) && (!clearScreen.wrappedValue || pressHeld) {
+            if !cleanScreen && (effectiveRate != 1 || rateBoost) && (!clearScreen.wrappedValue || pressHeld) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rateText(rateBoost ? 2 : effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
                         .accessibilityIdentifier("douyin.rateBadge")
@@ -416,7 +471,8 @@ struct PlayerPage: View {
                 .padding(.horizontal, 9).padding(.vertical, 5)
                 .background(Capsule().fill(.black.opacity(0.45)))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(.leading, 14).padding(.top, 66 * ui)
+                // Duo 上 66pt 正好在顶栏下面；其他手机的顶栏让到了安全区下沿（#16），角标跟着往下让
+                .padding(.leading, 14).padding(.top, DYDuoMetrics.isDuoHardware ? 66 * ui : DYDuoMetrics.windowSafeTop + 56)
                 .allowsHitTesting(false)
             }
         }
@@ -433,14 +489,22 @@ struct PlayerPage: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if isActive, !rateBoost, (!progressOnRail || clearScreen.wrappedValue) {
-                progressBar.padding(.bottom, max(bottomInset, 8))
+            if isActive, !rateBoost, !cleanScreen, (!progressOnRail || clearScreen.wrappedValue) {
+                progressBar
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("视频进度")
+                    .accessibilityValue("\(Int(current.isFinite ? current : 0)) / \(Int(duration.isFinite ? duration : 0)) 秒")
+                    .accessibilityIdentifier("douyin.progress")
+                    .padding(chromeInsets)
+                    .padding(.bottom, DYDuoMetrics.mediaBottomPadding(bottomInset))
                     .opacity(pressHeld ? 0 : clearScreen.wrappedValue ? 0.5 : 1)
                     .allowsHitTesting(!pressHeld)
                     .modifier(DDChromeOpacity(.progress))
             }
         }
         .preference(key: DYPlaybackPressKey.self, value: pressHeld && isActive)
+        .clipped()
+        .sensoryFeedback(.impact(weight: .light), trigger: rateBoost) { old, new in !old && new }
         .onAppear {
             pageActive = isActive
             // 当前条和下一条都提前建播放器：下一条只预滚不出声，滑到就能直接 play()。
@@ -449,7 +513,8 @@ struct PlayerPage: View {
             if isNext, !isActive { prerollNext() }
             boost?.press = { handleLongPress($0) }
             if isActive { bindRemote() }
-            DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() })
+            DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() },
+                                       retainsAudioSession: { !DDPlayback.shared.coverHold && pictureInPicture.keepsPlaybackOnExit })
         }
         .onDisappear {
             pageActive = false
@@ -462,10 +527,15 @@ struct PlayerPage: View {
             pauseForBackground()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            pictureInPicture.didEnterBackground()
             pauseForBackground()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             resumeAfterBackground()
+        }
+        .onChange(of: cleanScreen) { _, _ in
+            guard let p = player, vlc == nil else { return }
+            bindSeamlessAudio(to: p, initialPos: p.currentTime().seconds, active: isActive, playing: isPlaying)
         }
         .onChange(of: rateBoost) { _, on in boost?.boosting = on }
         .onChange(of: current) { _, _ in pushRailProgress() }
@@ -491,6 +561,7 @@ struct PlayerPage: View {
             guard isActive else { return }
             if !rateBoost { lockedBoost = false }
             let target = rateBoost ? 2 : newRate
+            // 1x ↔ 非 1x 的通路切换由 updateSeamlessRate() 统一处理（按 playRate 判定，含长按与锁定 2 倍）
             if let v = vlc { v.setRate(Float(target)); dmClock.sync(v.current, playing: v.isPlaying, rate: target) }
             else { updateSeamlessRate() }
         }
@@ -501,7 +572,8 @@ struct PlayerPage: View {
         .onChange(of: isActive) { _, active in
             pageActive = active
             if !active { finishSeeking() }
-            if !active { lockedBoost = false; pressHeld = false; rateBoost = false }
+            // 滑走就解锁：只锁「当前这条」；缩放也归位
+            if !active { lockedBoost = false; pressHeld = false; rateBoost = false; videoScale = 1; pinchMagnitude = 1 }
             if active { bindRemote() }
             if let v = vlc {
                 if active { v.mediaPlayer.audio?.isMuted = muted; v.mediaPlayer.play(); isPlaying = true }
@@ -537,6 +609,62 @@ struct PlayerPage: View {
         }
     }
 
+    private var videoPlane: some View {
+        ZStack {
+            if let vlc {
+                // 画面铺到屏幕边缘（状态栏/底部安全区也盖住）：跟抖音原生一样，不留上下黑边
+                VLCPlayerSurface(controller: vlc, fillWidth: fillWidth).ignoresSafeArea()
+            } else if let player {
+                // 画面层真正有帧可显示（isReadyForDisplay）就撤掉封面：预加载 / 本地缓存的视频滑过来就是真画面，
+                // 不再「先闪一下封面再播」
+                ZStack {
+                    VideoSurface(player: player, fillWidth: fillWidth, onReady: { if !firstFrame { firstFrame = true } },
+                                 pictureInPicture: pictureInPicture,
+                                 pictureInPictureEnabled: cleanScreen && isActive,
+                                 onPictureInPictureClose: {
+                                     userPaused = true
+                                     pauseInlineForBackground()
+                                 },
+                                 onPictureInPictureUnavailable: {
+                                     if !DDPlayback.bgPlay { pauseInlineForBackground() }
+                                 })
+                        .ignoresSafeArea()
+                    // 头部缓存接在线流：新播放器先叠在上面亮相（已缓冲、时间点对齐），再撤掉旧的，
+                    // 避免换 AVPlayerLayer 的 player 时断帧
+                    if let np = nextPlayer {
+                        VideoSurface(player: np, fillWidth: fillWidth)
+                            .ignoresSafeArea()
+                            .opacity(nextOpacity)
+                            .allowsHitTesting(false)
+                    }
+                }
+            } else {
+                ProgressView().tint(.white)
+            }
+            if vlc == nil, let hd = hdPlayer {
+                // 0.001 而不是 0：完全透明的层可能不出画面，换上来时会黑一下
+                VideoSurface(player: hd, fillWidth: fillWidth).ignoresSafeArea()
+                    .opacity(hdVisible ? 1 : 0.001).allowsHitTesting(false)
+            }
+            // 封面只给「还没缓存、还没出帧」的在线视频兜底；本地已缓存的直接等首帧（几十毫秒），不铺封面
+            if !firstFrame, !url.isFileURL, let posterURL {
+                GeometryReader { g in
+                    let screen = g.size.width / max(g.size.height, 1)
+                    let video = videoAspect > 0 ? videoAspect : screen
+                    let same = (video < 1) == (screen < 1)
+                    // 1600：封面原图 1080×1920，这里不是为了缩小，而是为了走 ImageCache.loadThumb →
+                    // ImageIO 在后台解码。不传这个参数时上是 UIImage(data:) 懒解码，第一帧在主线程解 ~2M 像素。
+                    CachedAsyncImage(url: posterURL, thumbnailMaxPixel: 1600) { img in
+                        img.resizable().aspectRatio(contentMode: fillWidth && same ? .fill : .fit)
+                    } placeholder: { Color.clear }
+                    .frame(width: g.size.width, height: g.size.height)
+                }
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
     private func pushRailProgress() {
         guard isActive, progressOnRail else { return }
         let pos = seeking ? seekPreview : current
@@ -546,8 +674,8 @@ struct PlayerPage: View {
     /// 长按加速开始/结束。手势层和右侧按钮（DYBoostControl）共用。
     private func handleLongPress(_ pressing: Bool) {
         // 清屏壳（DYPlaybackPressKey）跟着长按走：画面长按和右侧按钮都从这里进。
+        // 触感由下方的 .sensoryFeedback(trigger: rateBoost) 统一给一次，这里不再手动触发。
         pressHeld = pressing
-        if pressing && !rateBoost { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         if let v = vlc {
             if pressing { v.setRate(2); rateBoost = true } else if rateBoost { v.setRate(Float(effectiveRate)); rateBoost = false }
             return
@@ -576,7 +704,25 @@ struct PlayerPage: View {
             },
             enabled: isActive,
             topExclusion: max(topInset, 32),
-            bottomExclusion: max(bottomInset, 8) + 36 * ui
+            bottomExclusion: max(bottomInset, 8) + 36 * ui,
+            onContextMenu: onContextMenu,
+            // 画面横滑不 seek：进度跳转只认底部进度条，onSeek* 保持默认空实现
+            verticalFirst: true,
+            onHorizontalSwipe: navigationSwipes ? { left in
+                if left { onSwipeLeft?() } else { onSwipeRight?() }
+            } : nil,
+            onPinchBegan: { pinchMagnitude = 1 },
+            onPinchChanged: { scale in
+                pinchMagnitude = scale
+                videoScale = min(1.2, max(0.8, scale))
+            },
+            onPinchEnded: {
+                // 松手只提交「铺满 / 适应」这个全局开关，画面绝不留在任意大小或偏心的位置
+                if pinchMagnitude < 0.94 { onFillWidthChange?(false) }
+                else if pinchMagnitude > 1.06 { onFillWidthChange?(true) }
+                withAnimation(.snappy(duration: 0.22)) { videoScale = 1 }
+                pinchMagnitude = 1
+            }
         )
     }
 
@@ -753,11 +899,14 @@ struct PlayerPage: View {
         }
     }
 
-    /// 临时倍速、持久倍速和预载页激活共用实际播放速率，避免沿用旧通路。
+    /// 长按 2 倍速 / 锁定倍速是瞬时的：只有设置里的常驻倍速才切到独立音频引擎。
+    /// 引擎每次接管都要新建音频解码流，临时加速也走引擎会在按下和松手各卡一下，
+    /// 所以临时档继续用原生 AVPlayer 变速（softRate 平滑换速），引擎只服务常驻非 1x。
+    private var wantsEngineRoute: Bool { !cleanScreen && abs(liveRate - 1) > 0.001 }
+
     private func updateSeamlessRate() {
         guard vlc == nil, let p = player else { return }
-        let wantsEngine = abs(playRate - 1) > 0.001
-        if wantsEngine != seamAudio.usesEngine {
+        if wantsEngineRoute != seamAudio.usesEngine {
             bindSeamlessAudio(to: p, initialPos: p.currentTime().seconds, active: isActive, playing: isPlaying)
         } else if isPlaying, seamAudio.targetRate != playRate {
             seamAudio.setRate(playRate)
@@ -775,7 +924,7 @@ struct PlayerPage: View {
             }
         }
         seamAudio.bind(player: p, initialPosition: initialPos, isActive: active, isPlaying: playing, rate: playRate, muted: muted,
-                       useEngine: abs(playRate - 1) > 0.001)
+                       useEngine: wantsEngineRoute)
     }
 
     /// 下一条：只把缓冲和首帧准备好，不出声、不播放；滑到变 active 时直接 play()
@@ -989,6 +1138,7 @@ struct PlayerPage: View {
     private func pollUpgrade(_ low: AVPlayer, _ hd: AVPlayer, _ n: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             guard isActive, player === low, hdPlayer === hd else { return }
+            if pictureInPicture.active { cancelUpgrade(); return }
             guard let it = hd.currentItem, it.status != .failed else { cancelUpgrade(); return }
             let t = low.currentTime().seconds
             if it.status == .readyToPlay, !seeking, bufferedAhead(it, from: t + 0.1) >= 1.5 {
@@ -1082,7 +1232,13 @@ struct PlayerPage: View {
     /// 避免把仍在出声的直播会话一起拆掉。「后台播放」打开时这里直接返回。
     private func pauseForBackground() {
         finishSeeking()
+        // 画中画接管了声音：内联播放器不要再停，否则画中画会被掐断
+        if !DDPlayback.shared.coverHold, pictureInPicture.keepsPlaybackOnExit { return }
         if DDPlayback.bgPlay { return }
+        pauseInlineForBackground()
+    }
+
+    private func pauseInlineForBackground() {
         #if DEBUG
         ddWrite("DDBG pauseForBackground id=\(id) vlc=\(vlc != nil) av=\(player != nil) rate=\(player?.rate ?? -9) t=\(String(format: "%.1f", player?.currentTime().seconds ?? -1)) active=\(isActive)")
         #endif
@@ -1115,6 +1271,12 @@ struct PlayerPage: View {
         // 注册回调保留首次出现时的 View；isActive 是旧快照，必须读共享的 State。
         guard pageActive, DDPlayback.shared.appIsActive, !DDPlayback.shared.coverHold else { return }
         guard pendingPosition == nil else { return }
+        // 画中画还在播：先收回内联，再按退后台前的实际播放状态决定是否恢复
+        if pictureInPicture.active {
+            userPaused = (player?.rate ?? 0) == 0
+            isPlaying = !userPaused
+        }
+        pictureInPicture.returnToInline()
         // AppDelegate、Scene 和页面通知可能依次恢复；同一条只能起播一次。
         if isPlaying {
             if DDPlayback.bgPlay { seamAudio.syncAfterForeground(rate: playRate, muted: muted) }
@@ -1227,6 +1389,7 @@ struct PlayerPage: View {
     }
 
     private func teardownPlayerOnly() {
+        pictureInPicture.invalidate()
         seamAudio.reset()
         if let t = timeToken { player?.removeTimeObserver(t); timeToken = nil }
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
@@ -1347,6 +1510,7 @@ struct PlayerPage: View {
         sourceSwitchToken = UUID()
         sourceReadiness?.invalidate(); sourceReadiness = nil
         pendingPosition = nil
+        pictureInPicture.invalidate()
         cancelUpgrade()
         if let v = vlc { onSavePosition(v.current); v.onEnd = nil; v.onProgress = nil; v.stop(); vlc = nil }
         if let p = player { onSavePosition(seamAudio.currentMediaTime ?? p.currentTime().seconds) }
@@ -1385,6 +1549,10 @@ struct VideoSurface: UIViewRepresentable {
     var fillWidth: Bool = true
     /// 画面层第一次有帧可显示时回调（先按同向规则定好铺满方式再回调，不会先小后跳）
     var onReady: (() -> Void)? = nil
+    var pictureInPicture: DYPictureInPicture? = nil
+    var pictureInPictureEnabled = false
+    var onPictureInPictureClose: () -> Void = {}
+    var onPictureInPictureUnavailable: () -> Void = {}
     func makeUIView(context: Context) -> PlayerUIView {
         let v = PlayerUIView(player: player)
         v.fillWidth = fillWidth
@@ -1392,6 +1560,7 @@ struct VideoSurface: UIViewRepresentable {
         // 初始用 fit；真正的铺满由 applyGravity 按「是否同向」决定（surface 首帧前隐藏，看不到这中间态）
         v.playerLayer.videoGravity = .resizeAspect
         v.watchSize()
+        configurePictureInPicture(v)
         return v
     }
     func updateUIView(_ uiView: PlayerUIView, context: Context) {
@@ -1399,10 +1568,18 @@ struct VideoSurface: UIViewRepresentable {
         uiView.fillWidth = fillWidth
         uiView.onReady = onReady
         uiView.applyGravity()
+        configurePictureInPicture(uiView)
+    }
+    private func configurePictureInPicture(_ view: PlayerUIView) {
+        view.pictureInPicture = pictureInPicture
+        pictureInPicture?.attach(to: view.playerLayer, enabled: pictureInPictureEnabled,
+                                 onBackgroundClose: onPictureInPictureClose,
+                                 onUnavailable: onPictureInPictureUnavailable)
     }
 }
 
 final class PlayerUIView: UIView {
+    weak var pictureInPicture: DYPictureInPicture?
     var fillWidth = true
     var onReady: (() -> Void)?
     private var readyObs: NSKeyValueObservation?
@@ -1419,9 +1596,13 @@ final class PlayerUIView: UIView {
         let nc = NotificationCenter.default
         bgObs = [
             nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-                guard DDPlayback.bgPlay, let self, let p = self.playerLayer.player else { return }
-                p.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
-                self.detached = p; self.playerLayer.player = nil
+                // NotificationCenter delivers this observer on OperationQueue.main.
+                MainActor.assumeIsolated {
+                    guard DDPlayback.bgPlay, let self, self.pictureInPicture?.keepsVideoLayer != true,
+                          let p = self.playerLayer.player else { return }
+                    p.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+                    self.detached = p; self.playerLayer.player = nil
+                }
             },
             nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
                 guard let self, let p = self.detached else { return }

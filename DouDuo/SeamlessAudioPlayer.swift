@@ -499,7 +499,6 @@ final class DDSeamlessController {
         self.isMuted = muted
         self.mode = .preparing
         self.usesEngine = useEngine
-
         #if DEBUG
         ddWrite("DDSEAM bind engine=\(useEngine) rate=\(rate)")
         #endif
@@ -511,7 +510,7 @@ final class DDSeamlessController {
             }
             if let it = player.currentItem { DDAudioStream.enableAudioTracks(on: it) }
             player.isMuted = !wantPlaying || muted
-            if wantPlaying { player.rate = targetRate }
+            if wantPlaying { player.rate = targetRate } else { player.pause() }
             return
         }
 

@@ -73,7 +73,13 @@ final class DYLiveModel: ObservableObject {
         UserDefaults.standard.set(q, forKey: "douyin_live_quality_v1")
         retry()
     }
-    @Published var muted = false {
+    @Published var muted: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["DOUDUO_TEST_MUTE"] == "1"
+        #else
+        false
+        #endif
+    }() {
         didSet {
             // 点「解除静音」时先解掉本次启动静音，不然声音仍被启动策略压着
             if !muted, DDPlaybackSession.shared.isStartupMuted { DDPlaybackSession.shared.endStartupMute() }

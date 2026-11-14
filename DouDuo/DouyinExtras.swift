@@ -435,7 +435,7 @@ extension DouyinBridge {
 /// 仅影响视频滚动弹幕：上方三分之一、字号 / 行数、密度限流与短时间相同内容去重。
 /// 行数 0 = 自动（1/3 区域内该字号放得下的行数，再受密度上限约束），1...10 = 手动上限；
 /// 两种模式都会被「上方 1/3 区域 - 顶部安全区」的实际高度截断：字号越大，最多可容纳的行数越少。
-fileprivate enum DYDanmakuPolicy {
+enum DYDanmakuPolicy {
     /// `laneHeight` 是 15pt 字号（默认）的轨道高度；其它字号用 `laneHeight(fitting:)` 同比缩放，大字不会挤在一起。
     static let baseFontSize: CGFloat = 15
     static let laneHeight: CGFloat = 28
@@ -609,7 +609,6 @@ struct DYDanmakuOptions: View {
         .accessibilityValue("\(currentDensity.title)，字号\(fontPoint)pt，行数\(lines == 0 ? "自动" : "最多\(lines)行")，透明度\(opacityPercent)%，清屏\(inClear ? "显示" : "隐藏")，去重\(deduplicate ? "开启" : "关闭")")
     }
 }
-
 // MARK: - 弹幕层（视频）
 
 /// 弹幕时钟：播放器每 0.25 秒报一次进度，弹幕按帧插值出「现在」的视频时间，否则位置一跳一跳。
@@ -914,25 +913,26 @@ struct DYListPlayer: View {
     private var current: DYAweme? { items.first { $0.id == currentID } }
 
     var body: some View {
-        GeometryReader { geo in
+        DYCommentPlayerLayout(bridge: bridge, aweme: current, showComments: $showComments, focus: commentFocus, onBack: { dismiss() }) { insets in
             ZStack(alignment: .topLeading) {
                 Color.black.ignoresSafeArea()
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
                         ForEach(items) { item in
-                            DYVideoPage(item: item, isCurrent: item.id == currentID, insets: geo.safeAreaInsets,
+                            DYVideoPage(item: item, isCurrent: item.id == currentID, insets: insets,
                                         resume: resume[item.id], liked: liked.contains(item.id), collected: collected.contains(item.id),
                                         onLike: { toggleLike(item.id, force: nil) }, onCollect: { toggleCollect(item.id) },
+                                        onDoubleTap: { showComments = true },
                                         onComments: { showComments = true },
-                                        onSearch: {},
                                         onAuthor: { onAuthor(item) },
                                         onSavePosition: { resume[item.id] = $0 }, preloader: preloader,
-                                        bridge: bridge, onToast: { show($0) }, onBack: { dismiss() })
+                                        bridge: bridge, onToast: { show($0) })
                                 .containerRelativeFrame([.horizontal, .vertical])
                                 .id(item.id)
                         }
                     }
                     .scrollTargetLayout()
+                    .background(DYPagingSpeedBridge(ids: items.map(\.id), currentID: $currentID))
                 }
                 .scrollTargetBehavior(.paging)
                 .scrollPosition(id: $currentID, anchor: .center)
@@ -959,8 +959,8 @@ struct DYListPlayer: View {
                             backDrag = dx
                         },
                         onEnded: { dx, vx in
-                            let w = max(geo.size.width, 1)
-                            if backDrag > w * 0.25 || vx > 900 || dx > w * 0.45 {
+                            // 整屏由 DYCommentPlayerLayout 承载，这里拿不到 geo：用固定距离 + 速度判定退出。
+                            if dx > 150 || vx > 900 {
                                 backDrag = 0
                                 dismiss()
                             } else {
@@ -969,20 +969,19 @@ struct DYListPlayer: View {
                         }
                     )
                     .frame(width: 24)
-                    .padding(.bottom, max(geo.safeAreaInsets.bottom, 18) + 72)
-                }
-            }
-            .sheet(isPresented: $showComments) {
-                if let cur = current {
-                    DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false }, focus: commentFocus)
-                        // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
-                        .presentationDetents([.fraction(0.62)])
+                    .padding(.bottom, max(insets.bottom, 18) + 72)
                 }
             }
         }
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
         .environment(\.dyClearScreen, $clearScreen)
         .statusBarHidden(playbackPressHeld || clearScreen)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.list.player")
+        // 全屏播放器自带一套 chrome：既不继承分屏作者页隐藏的侧栏，也不继承首页钉住的顶部栏。
+        .environment(\.duoSystemBars, true)
+        .environment(\.duoCleanScreen, false)
+        .environment(\.duoInlineVideoNavigation, false)
         .onChange(of: currentID) { old, new in
             if new == nil, let old { currentID = old; return }
             guard let i = items.firstIndex(where: { $0.id == new }) else { return }
@@ -1291,11 +1290,12 @@ struct FlowLayout: Layout {
 // MARK: - 我的
 
 struct DYMineScreen: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     let bridge: DouyinBridge
     let onLogin: () -> Void
     let onAuthor: (DYAweme) -> Void
     var onMessages: (() -> Void)? = nil
-    @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var userErr: String?
     @State private var kind: DYListKind = .post
@@ -1306,13 +1306,12 @@ struct DYMineScreen: View {
     var body: some View {
         NavigationStack {
             content
+                .modifier(DYSystemTabBar())
                 .navigationTitle(user?.name ?? "我的")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    // Duo：返回 + 操作走系统 toolbar，系统放进右侧竖向侧栏（每项都有标题+符号）
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("返回", systemImage: "chevron.backward") { dismiss() }
-                            .accessibilityIdentifier("douyin.mine.back")
+                    if chromeModeRaw != DDChromeMode.duoClassic.rawValue {
+                        ToolbarItem(placement: .navigation) { Button("返回", systemImage: "chevron.backward") { dismiss() } }
                     }
                     ToolbarItem(placement: .primaryAction) {
                         Button("网页版 / 登录", systemImage: "safari") { onLogin() }
@@ -1320,7 +1319,6 @@ struct DYMineScreen: View {
                 }
         }
         .preferredColorScheme(.dark)
-        .modifier(DYEdgeSwipeBack(action: { dismiss() }))
     }
 
     private var content: some View {
@@ -1351,6 +1349,15 @@ struct DYMineScreen: View {
         }
         .background(Color.black.ignoresSafeArea())
         .task {
+            #if DEBUG
+            // UI-only entry fixture: a real public work, never a fake account list.
+            if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "mine",
+               let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
+               let item = try? await bridge.awemeDetail(id) {
+                open = DYListTarget(title: "评论布局回归", items: [item], start: 0, model: nil)
+                return
+            }
+            #endif
             do { user = try await bridge.selfProfile() } catch { userErr = error.localizedDescription }
         }
         .onAppear { ensure(kind) }
@@ -1365,6 +1372,9 @@ struct DYMineScreen: View {
     }
 
     private func ensure(_ k: DYListKind) {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "mine" { return }
+        #endif
         guard models[k] == nil else { return }
         let m = DYPagedModel { [bridge] cur in try await bridge.myList(k, cursor: cur) }
         models[k] = m
@@ -1455,6 +1465,8 @@ struct DYAuthorScreen: View {
     let bridge: DouyinBridge
     let author: DYAweme.Author
     let onWeb: (URL) -> Void
+    var onClose: (() -> Void)? = nil
+    var onWorkPresentationChange: ((Bool) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var err: String?
@@ -1471,15 +1483,6 @@ struct DYAuthorScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Button { dismiss() } label: {
-                    Image(systemName: "chevron.left").font(.headline.weight(.semibold)).foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                }
-                .accessibilityIdentifier("douyin.author.back")
-                Spacer()
-                followButton
-            }
             if let u = user {
                 DYUserHeader(user: u)
             } else if let err {
@@ -1489,7 +1492,7 @@ struct DYAuthorScreen: View {
             }
             if let s = author.secUid, let u = URL(string: "https://www.douyin.com/user/\(s)") {
                 Button {
-                    dismiss()
+                    close()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onWeb(u) }
                 } label: {
                     Text("网页版")
@@ -1503,6 +1506,7 @@ struct DYAuthorScreen: View {
                 Text(followMsg).font(.caption2).foregroundStyle(.orange)
             }
             DYGrid(items: posts, hasMore: hasMore, loading: loading, error: postErr, onLoadMore: { requestMore() }, onOpen: { i in
+                onWorkPresentationChange?(true)
                 player = DYAuthorPlay(index: i)
             })
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1510,8 +1514,23 @@ struct DYAuthorScreen: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .background(Color.black.ignoresSafeArea())
-        .fullScreenCover(item: $player) { p in
+        .background(Color.black)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.author.panel")
+        .navigationBarBackButtonHidden()
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button("返回", systemImage: "chevron.backward", action: close)
+                    .accessibilityIdentifier("douyin.author.back")
+            }
+            .dyVerticalPreferred()
+            ToolbarItem(placement: .primaryAction) { followButton }
+                .dyVerticalPreferred()
+        }
+        .fullScreenCover(item: $player, onDismiss: { onWorkPresentationChange?(false) }) { p in
             DYListPlayer(bridge: bridge, title: author.name.isEmpty ? "作品" : author.name, items: posts, start: p.index,
                          loadMore: { await loadPosts() }, onAuthor: { _ in })
         }
@@ -1520,22 +1539,31 @@ struct DYAuthorScreen: View {
             async let profile: Void = loadProfile(s)
             async let state: Void = loadFollow(s)
             _ = await (profile, state)
+            #if DEBUG
+            // Exercise the real author -> work navigation when a logged-out
+            // posts request returns an empty list. Only a matching public work
+            // is seeded; the release build never includes this test route.
+            if ProcessInfo.processInfo.environment["DOUDUO_AUTHOR_WORK_FIXTURE"] == "1",
+               let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
+               let item = try? await bridge.awemeDetail(id), item.author.secUid == s {
+                posts = [item]
+                hasMore = false
+                return
+            }
+            #endif
             _ = await loadPosts()
         }
     }
 
+    private func close() { if let onClose { onClose() } else { dismiss() } }
+
     @ViewBuilder
     private var followButton: some View {
         let uid = followUID ?? author.uid
-        Button { Task { await toggleFollow() } } label: {
-            Text(followBusy ? "…" : (followed ? "已关注" : "关注"))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(followed ? .white : .black)
-                .padding(.horizontal, 14)
-                .frame(height: 32)
-                .background(Capsule().fill(followed ? Color.white.opacity(0.16) : Color.white))
+        Button(followBusy ? "处理中" : (followed ? "已关注" : "关注"),
+               systemImage: followed ? "person.badge.minus" : "person.badge.plus") {
+            Task { await toggleFollow() }
         }
-        .buttonStyle(.plain)
         .disabled(followBusy || uid == nil || uid?.isEmpty == true)
         .accessibilityIdentifier("douyin.author.follow")
     }
@@ -1547,6 +1575,7 @@ struct DYAuthorScreen: View {
     private func loadFollow(_ sec: String) async {
         if let s = try? await bridge.followState(sec: sec) {
             followed = s.followed
+            bridge.rememberFollow(author, followed: s.followed)
             if let uid = s.uid, !uid.isEmpty { followUID = uid }
         }
     }
@@ -1592,6 +1621,7 @@ struct DYAuthorScreen: View {
             switch try await bridge.followUser(uid, follow: want) {
             case .ok:
                 followed = want
+                bridge.rememberFollow(author, followed: want)
                 followMsg = nil
             case .notLoggedIn:
                 followMsg = "抖音未登录"
@@ -1618,6 +1648,8 @@ struct DYFollowFeed: View {
     let onAuthor: (DYAweme) -> Void
     let onLogin: () -> Void
     let onToast: (String) -> Void
+    let onComments: (DYAweme) -> Void
+    var onShowRecommendations: (() -> Void)? = nil
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
     @StateObject private var model: DYPagedModelHolder = DYPagedModelHolder()
@@ -1626,7 +1658,6 @@ struct DYFollowFeed: View {
     @State private var resume: [String: Double] = [:]
     @State private var liked: Set<String> = []
     @State private var collected: Set<String> = []
-    @State private var showComments = false
 
     var body: some View {
         let m = model.model(bridge)
@@ -1656,15 +1687,16 @@ struct DYFollowFeed: View {
                                         resume: resume[item.id], liked: liked.contains(item.id) || item.userDigged == 1,
                                         collected: collected.contains(item.id) || item.isCollect == 1,
                                         onLike: { like(item.id, force: nil) }, onCollect: { collect(item.id) },
-                                        onComments: { showComments = true },
-                                        onSearch: {},
+                                        onDoubleTap: { like(item.id, force: true) }, onComments: { onComments(item) },
                                         onAuthor: { onAuthor(item) }, onSavePosition: { resume[item.id] = $0 },
-                                        preloader: preloader, bridge: bridge, onToast: onToast)
+                                        preloader: preloader, bridge: bridge, onToast: onToast,
+                                        onNavigateLeft: onShowRecommendations)
                                 .containerRelativeFrame([.horizontal, .vertical])
                                 .id(item.id)
                         }
                     }
                     .scrollTargetLayout()
+                    .background(DYPagingSpeedBridge(ids: m.items.map(\.id), currentID: $currentID))
                 }
                 .scrollTargetBehavior(.paging)
                 .scrollPosition(id: $currentID, anchor: .center)
@@ -1672,14 +1704,24 @@ struct DYFollowFeed: View {
                 .ignoresSafeArea()
             }
         }
-        .sheet(isPresented: $showComments) {
-            if let cur = m.items.first(where: { $0.id == currentID }) {
-                DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false })
-                    // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
-                    .presentationDetents([.fraction(0.62)])
-            }
-        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.follow.feed")
+        .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
+            guard m.items.isEmpty, value.translation.width < -60,
+                  abs(value.translation.width) > abs(value.translation.height) * 1.2 else { return }
+            onShowRecommendations?()
+        })
         .task {
+            #if DEBUG
+            // Exercise the real following player without requiring an account.
+            if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "follow",
+               let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
+               let item = try? await bridge.awemeDetail(id) {
+                m.items = [item]; m.hasMore = false; currentID = item.id
+                return
+            }
+            #endif
             if m.items.isEmpty { await m.loadMore() }
             if currentID == nil { currentID = m.items.first?.id }
         }
@@ -1689,7 +1731,7 @@ struct DYFollowFeed: View {
             preloader.update(m.items, current: i)
             if i >= m.items.count - 4 { Task { await m.loadMore() } }
         }
-        // 关注页只放关注作品。关注主播开播统一在直播页顶部头像条/「我的关注」里看，这里不再重复一排直播头像。
+        // 关注页只放关注作品。关注主播开播统一走直播页的「我的关注」。
         .onChange(of: active) { _, a in if !a { preloader.clear() } }
         .onDisappear { preloader.clear() }
     }
@@ -1765,6 +1807,13 @@ final class DYPagedModelHolder: ObservableObject {
     }
 }
 #endif
+
+extension ToolbarContent {
+    @ToolbarContentBuilder func dyVerticalPreferred() -> some ToolbarContent {
+        if #available(iOS 27.1, *) { self.axisBehavior(.verticalPreferred) }
+        else { self }
+    }
+}
 
 /// 左缘右滑退出的触摸捕获条：SwiftUI 的 DragGesture 在视频（UIKit 承载）上收不到起手，
 /// 这里用一条只有 24pt 宽的透明 UIView 加 UIPan，既不吃正文的手势，也能跟手驱动返回位移。

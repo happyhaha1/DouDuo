@@ -75,6 +75,7 @@ final class AVAudioSession {
 
 final class AVPlayer {
     var playCount = 0
+    var rate: Float = 1
     func play() { playCount += 1 }
 }
 
@@ -95,6 +96,13 @@ final class StubMediaPlayer {
 
 final class VLCPlayerController {
     let mediaPlayer = StubMediaPlayer()
+}
+
+final class StubPictureInPicture {
+    var active = false
+    var keepsPlaybackOnExit = false
+    func returnToInline() { active = false }
+    func invalidate() { active = false }
 }
 
 final class DDSeamlessController {
@@ -128,6 +136,7 @@ final class Harness {
     var hdPlayer: HDPlayer?
     var vlc: VLCPlayerController?
     var seamAudio = DDSeamlessController()
+    var pictureInPicture = StubPictureInPicture()
 
     init(capturedIsActive: Bool, pageActive: Bool) {
         self.isActive = capturedIsActive
