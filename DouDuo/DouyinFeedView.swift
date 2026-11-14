@@ -1265,22 +1265,6 @@ struct DYUpstreamFeedScreen: View {
         let safeTop = DYDuoMetrics.windowSafeTop
         return hSize == .regular ? safeTop : safeTop - 80
     }
-    /// 默认 / 简洁 / 极简模式没有系统工具栏，自己画一颗和经典布局外观一致的清屏按钮。
-    private var cleanToggle: some View {
-        Button {
-            withAnimation(.snappy) { cleanScreen.toggle() }
-        } label: {
-            Image(systemName: cleanScreen ? "eye" : "eye.slash")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(theme.media.onMedia.color(for: scheme))
-                .frame(width: 50, height: 50)
-                .background(.ultraThinMaterial, in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(cleanScreen ? "退出清屏" : "清屏")
-        .accessibilityIdentifier("douyin.cleanScreen")
-    }
     /// 顶栏可用宽度：评论栏从右侧滑出时 = 视频区宽度，顶栏跟着视频居中、自适应收紧（默认模式用）
     @State private var topBarWidth: CGFloat?
     @State private var topChrome = CGRect.zero
@@ -1349,7 +1333,8 @@ struct DYUpstreamFeedScreen: View {
             }
         }
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
-        .statusBarHidden(playbackPressHeld || hideStatusBar || cleanScreen)
+        // 清屏不隐状态栏：经典布局的清屏也只收应用自己的界面，状态栏留着，右侧容器才不会跳。
+        .statusBarHidden(playbackPressHeld || hideStatusBar)
         .onPreferenceChange(DYTopChromeFrameKey.self) { next in
             guard abs(next.maxY - topChrome.maxY) > 0.5 || abs(next.minY - topChrome.minY) > 0.5 else { return }
             topChrome = next
@@ -1380,12 +1365,33 @@ struct DYUpstreamFeedScreen: View {
         // 简洁/极简模式的 ignoresSafeArea 已在 layoutRoot 上，这里不重复加，避免影响侧边栏的安全区测量。
         .modifier(DDClassicTopInset(active: !railMode))
         .coordinateSpace(.named("douduo.feed"))
-        // 直播间返回键只保留 DYLiveRoomPage 里那一颗画面内「返回」胶囊：
-        // 主视图不挂 NavigationStack / toolbar，避免 Duo 系统侧栏再渲染一个重复的返回按钮。
+        // 经典以外的三种布局没有系统工具栏。这里补一个只挂清屏按钮的 NavigationStack，
+        // 直接复用经典布局那颗按钮（同一样式、同一套无障碍），互动胶囊仍由右侧容器自己画。
+    }
+
+    @ViewBuilder private var chromeHost: some View {
+        if #available(iOS 27.1, *) {
+            NavigationStack {
+                chrome
+                    .overlay {
+                        DYNativeVideoActions(actions: nil,
+                                             isClean: cleanScreen,
+                                             onToggleClean: { withAnimation(.snappy) { cleanScreen.toggle() } },
+                                             showsActionCapsule: false,
+                                             showsClean: tab != .live)
+                    }
+                    .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
+                    .toolbarMinimizationBehavior(.never, for: .navigationBar)
+                    .scrollEdgeEffectHidden(true, for: .all)
+            }
+            .tint(nil)
+        } else {
+            chrome
+        }
     }
 
     private var loadedFeed: some View {
-        chrome.background(DouyinBridgeHost(bridge: bridge).frame(width: 1, height: 1).allowsHitTesting(false))
+        chromeHost.background(DouyinBridgeHost(bridge: bridge).frame(width: 1, height: 1).allowsHitTesting(false))
         .task {
             guard !initialized else { return }
             initialized = true
@@ -2011,8 +2017,8 @@ struct DYUpstreamFeedScreen: View {
     /// The selector and current video actions share the same outer-column geometry.
     /// Empty and live pages reserve the same slots, so changing modules never moves the selector.
     private func rootActionRail(_ entry: DYFeedRailEntry?, selector: Bool) -> some View {
-        // 容器高度固定：清屏前后不变，顶端的清屏按钮就不会跟着跳。
-        let railHeight: CGFloat = 515
+        // 清屏按钮由系统工具栏画在右侧栏顶端，容器高度保持经典布局不变。
+        let railHeight: CGFloat = 423
         return DYAdaptiveActionRail { edge in
             // Read the current container's inset before expanding into the outer column.
             // A size class does not describe the width of the system's vertical bar.
@@ -2021,19 +2027,9 @@ struct DYUpstreamFeedScreen: View {
                 // Preserve the theme's optical inset so the circles align with system status glyphs.
                 let outerPadding = columnInset > 0 ? max(0, (columnInset - 54) / 2 + theme.media.expandedRailOpticalInset) : 12
                 GeometryReader { geometry in
-                    // 清屏按钮长在容器顶端。容器照旧贴底；一旦顶端顶进系统状态区（那里的触摸会被系统截走），
-                    // 就改成从状态区下沿往下排，保证按钮和入口都点得到。
-                    let preferredBottom: CGFloat = 92
-                    let topLimit = DYDuoMetrics.isDuoHardware ? 140 : max(DYDuoMetrics.windowSafeTop, 8) + 4
-                    let fitsBottom = geometry.size.height - preferredBottom - railHeight >= topLimit
-                    let bottomPad = fitsBottom ? preferredBottom : 0
                     // 长按加速时整列淡出（入口 + 按钮 + 进度环），和默认模式一致（issue #4）
                     DDBoostFade {
                         VStack(spacing: theme.media.actionGroupSpacing) {
-                            if !playbackPressHeld {
-                                cleanToggle
-                                    .modifier(DDChromeOpacity(.top))
-                            }
                             Group {
                                 if selector {
                                     moduleMenu(edge: edge)
@@ -2042,7 +2038,7 @@ struct DYUpstreamFeedScreen: View {
                                     Color.clear.frame(height: 50).allowsHitTesting(false)
                                 }
                             }
-                            // 清屏只收内容：这些位置留着，容器高度不变，顶端的清屏按钮就不会跳动。
+                            // 清屏只收内容：入口和互动胶囊淡出，清屏按钮由系统工具栏留在原处。
                             .opacity(cleanScreen ? 0 : 1)
                             .allowsHitTesting(!cleanScreen)
                             .accessibilityHidden(cleanScreen)
@@ -2058,13 +2054,11 @@ struct DYUpstreamFeedScreen: View {
                     .frame(width: 54, height: railHeight, alignment: .top)
                     .accessibilityElement(children: .contain)
                     .modifier(DYRailReservedNudge(railEdge: edge,
-                                                  verticalSpace: fitsBottom ? (-max(0, geometry.size.height - railHeight - bottomPad))...bottomPad : nil))
+                                                  verticalSpace: (-max(0, geometry.size.height - railHeight - 92))...92))
                     .padding(.horizontal, outerPadding)
-                    .padding(.bottom, bottomPad)
+                    .padding(.bottom, 92)
                     .frame(maxWidth: .infinity, maxHeight: .infinity,
-                           alignment: fitsBottom ? (edge == .leading ? .bottomLeading : .bottomTrailing)
-                                                 : (edge == .leading ? .topLeading : .topTrailing))
-                    .padding(.top, fitsBottom ? 0 : topLimit)
+                           alignment: edge == .leading ? .bottomLeading : .bottomTrailing)
                 }
                 // Only the rail extends into the system column; reserved-region avoidance remains active.
                 // 竖向也忽略安全区：隐藏状态栏不会改变这里的画布高度，容器的位置因此不会跟着跳。
@@ -2342,8 +2336,7 @@ struct DYUpstreamFeedScreen: View {
                            onToast: { showToast($0) },
                            onDislike: { dislike(item.id) },
                            moreExtras: extras,
-                           onEnded: { playNext(after: item.id) },
-                           onToggleClean: { withAnimation(.snappy) { cleanScreen.toggle() } })
+                           onEnded: { playNext(after: item.id) })
     }
 
     /// 点赞：先本地乐观更新，再调抖音网页接口，按服务端返回决定成败
@@ -2717,8 +2710,6 @@ struct DYVideoPage: View {
     /// 右侧评论 / UP 主页展开时，右滑先收回面板（经典布局用）
     var panelOpen: Bool = false
     var onClosePanel: (() -> Void)? = nil
-    /// 右侧栏顶部的清屏按钮（默认 / 简洁 / 极简用；经典布局走系统工具栏）
-    var onToggleClean: (() -> Void)? = nil
     init(item: DYAweme, isCurrent: Bool, isNext: Bool = false, insets: EdgeInsets, resume: Double?, liked: Bool, collected: Bool,
          onLike: @escaping () -> Void, onCollect: @escaping () -> Void, onDoubleTap: @escaping () -> Void,
          onComments: @escaping () -> Void, onSearch: @escaping () -> Void = {}, onAuthor: @escaping () -> Void, onSavePosition: @escaping (Double) -> Void,
@@ -2726,8 +2717,7 @@ struct DYVideoPage: View {
          onDislike: (() -> Void)? = nil, moreExtras: AnyView = AnyView(EmptyView()),
          onEnded: (() -> Void)? = nil,
          onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil, onBack: (() -> Void)? = nil,
-         panelOpen: Bool = false, onClosePanel: (() -> Void)? = nil,
-         onToggleClean: (() -> Void)? = nil) {
+         panelOpen: Bool = false, onClosePanel: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.isNext = isNext; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
         self.onLike = onLike; self.onCollect = onCollect; self.onDoubleTap = onDoubleTap
@@ -2739,7 +2729,6 @@ struct DYVideoPage: View {
         self.onNavigateLeft = onNavigateLeft
         self.panelOpen = panelOpen
         self.onClosePanel = onClosePanel
-        self.onToggleClean = onToggleClean
         self.onSearch = onSearch; self.moreExtras = moreExtras; self.onBack = onBack
     }
 
@@ -2756,8 +2745,7 @@ struct DYVideoPage: View {
                 liked: liked, collected: collected, onLike: onLike, onCollect: onCollect,
                 onComments: onComments, onSearch: onSearch, onAuthor: onAuthor,
                 onSavePosition: onSavePosition, preloader: preloader, bridge: bridge, onToast: onToast,
-                onDislike: onDislike, moreExtras: moreExtras, onEnded: onEnded, onBack: onBack ?? standaloneBack,
-                onToggleClean: onToggleClean)
+                onDislike: onDislike, moreExtras: moreExtras, onEnded: onEnded, onBack: onBack ?? standaloneBack)
         }
     }
 }
@@ -3734,8 +3722,6 @@ struct DYUpstreamVideoPage: View {
     /// 播完切下一条（「自动连播」打开才生效）
     var onEnded: (() -> Void)? = nil
     var onBack: (() -> Void)? = nil
-    /// 右侧栏顶部清屏按钮的动作；由推荐流注入，经典布局不走这里
-    var onToggleClean: (() -> Void)? = nil
     @AppStorage("douyin_autoplay_v1") private var autoNext = false
     @State private var pressHeld = false
     @State private var danmaku: [DYDanmaku] = []
@@ -3768,8 +3754,7 @@ struct DYUpstreamVideoPage: View {
          onComments: @escaping () -> Void, onSearch: @escaping () -> Void, onAuthor: @escaping () -> Void, onSavePosition: @escaping (Double) -> Void,
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil, moreExtras: AnyView = AnyView(EmptyView()),
-         onEnded: (() -> Void)? = nil, onBack: (() -> Void)? = nil,
-         onToggleClean: (() -> Void)? = nil) {
+         onEnded: (() -> Void)? = nil, onBack: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.isNext = isNext; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
         self.onLike = onLike; self.onCollect = onCollect
@@ -3779,7 +3764,6 @@ struct DYUpstreamVideoPage: View {
         self.moreExtras = moreExtras
         self.onEnded = onEnded
         self.onBack = onBack
-        self.onToggleClean = onToggleClean
     }
 
     var body: some View {
@@ -3847,10 +3831,6 @@ struct DYUpstreamVideoPage: View {
                         .allowsHitTesting(!pressHeld && !cleanScreen)
                     Spacer(minLength: 0)
                     VStack(spacing: theme.media.actionGroupSpacing) {
-                        // 清屏按钮长在容器顶端，清屏时容器整体淡出、它留在原处用来退出。
-                        if !pressHeld, let onToggleClean {
-                            cleanEyeButton(fg)
-                        }
                         actionButtons(fg)
                             .opacity(pressHeld || cleanScreen ? 0 : 1)
                             .accessibilityHidden(pressHeld || cleanScreen)
@@ -4035,22 +4015,6 @@ struct DYUpstreamVideoPage: View {
         .padding(.horizontal, hSize == .compact ? 9 : 0)
     }
 
-    /// 默认布局右侧容器顶端的清屏按钮。
-    private func cleanEyeButton(_ fg: Color) -> some View {
-        Button(action: { onToggleClean?() }) {
-            Image(systemName: cleanScreen ? "eye" : "eye.slash")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(fg)
-                .frame(width: 50, height: 50)
-                .contentShape(Circle())
-                .ddGlassCircle()
-                .frame(width: actionColumnWidth)
-        }
-        .buttonStyle(.plain)
-        .modifier(DYHoldBoost(control: boost))
-        .accessibilityLabel(cleanScreen ? "退出清屏" : "清屏")
-        .accessibilityIdentifier("douyin.cleanScreen")
-    }
 
     private func actionButtons(_ fg: Color) -> some View {
         VStack(spacing: theme.media.actionGroupSpacing) {

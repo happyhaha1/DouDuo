@@ -41,12 +41,35 @@ struct DYVideoToolbarActions {
     let share: AnyView
 }
 
+/// 经典布局在系统工具栏里画的那颗清屏按钮。经典以外的三种布局复用同一份实现，
+/// 样式、无障碍标签和点击面积与经典完全一致。
+@available(iOS 27.1, *)
+struct DYCleanScreenButton: View {
+    let isClean: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isClean ? "eye" : "eye.slash")
+                .font(.title3)
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+            .accessibilityLabel(isClean ? "退出清屏" : "清屏")
+            .accessibilityIdentifier("douyin.cleanScreen")
+    }
+}
+
 @available(iOS 27.1, *)
 struct DYNativeVideoActions: View {
     @Environment(\.toolbarVerticalEdge) private var verticalEdge
     let actions: DYVideoToolbarActions?
     let isClean: Bool
     let onToggleClean: () -> Void
+    /// 经典布局两项都开；经典以外的布局只借这颗清屏按钮，互动胶囊由它们自己的容器画。
+    var showsActionCapsule = true
+    var showsClean = true
     @State private var anchorFrame: CGRect = .zero
     @State private var windowHeight: CGFloat = 0
     private var slotHeight: CGFloat {
@@ -58,15 +81,7 @@ struct DYNativeVideoActions: View {
         Color.clear.frame(width: 0, height: 0).allowsHitTesting(false)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button(action: onToggleClean) {
-                        Image(systemName: isClean ? "eye" : "eye.slash")
-                            .font(.title3)
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                        .accessibilityLabel(isClean ? "退出清屏" : "清屏")
-                        .accessibilityIdentifier("douyin.cleanScreen")
+                    DYCleanScreenButton(isClean: isClean, action: onToggleClean)
                         .background(DYToolbarFrameReader { frame, height in
                             withTransaction(Transaction(animation: nil)) {
                                 anchorFrame = frame
@@ -76,7 +91,7 @@ struct DYNativeVideoActions: View {
                 }
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                .hidden(actions == nil)
+                .hidden(!showsClean)
 
                 // The stable clear-screen anchor is independent of this group's size.
                 // A new item identity invalidates the native cached fitting size.
@@ -100,14 +115,13 @@ struct DYNativeVideoActions: View {
                 .sharedBackgroundVisibility(.hidden)
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                .hidden(actions == nil || verticalEdge == nil || isClean)
+                .hidden(!showsActionCapsule || actions == nil || verticalEdge == nil || isClean)
             }
             // Retain the last measured slot across navigation and sheets.
             // Resetting it would briefly expand the tabs on every return,
             // until the system lays out the anchor again.
     }
 }
-
 /// Standalone works have no tab selector. Keep Back separate from the compact
 /// interaction capsule, so the system never turns the video actions into More.
 @available(iOS 27.1, *)
