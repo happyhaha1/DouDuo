@@ -1200,17 +1200,24 @@ final class DouDuoUITests: XCTestCase {
         sleep(5)
         return app
     }
-    /// 默认三档模式不再提供清屏入口（清屏只属于 Duo「经典」布局）。
-    func testDefaultChromeModesHaveNoClearEntry() throws {
+    /// 默认三档模式也提供清屏：和 Duo「经典」布局同位置，清屏后按钮必须留着能退出。
+    func testDefaultChromeModesToggleCleanScreen() throws {
         continueAfterFailure = false
         for mode in ["classic", "rail", "minimal"] {
             let app = launchChrome(mode)
-            XCTAssertFalse(app.buttons["douyin.clearScreen"].firstMatch.exists, "\(mode) 不应再有清屏入口")
-            XCTAssertTrue(app.buttons["douyin.more"].firstMatch.isHittable)
-            if mode != "classic" {
-                XCTAssertTrue(app.buttons["douyin.module.menu"].firstMatch.isHittable)
-            }
-            attach(app, "no-clear-screen-\(mode)")
+            let clean = app.buttons["douyin.cleanScreen"].firstMatch
+            XCTAssertTrue(clean.waitForExistence(timeout: 10), "\(mode) 应有清屏按钮")
+            XCTAssertTrue(clean.isHittable, "\(mode) 清屏按钮应可点")
+            attach(app, "clean-off-\(mode)")
+            clean.tap()
+            // 点完要重新取一次快照，旧句柄的 label 不会自己刷新。
+            XCTAssertTrue(wait(label: "退出清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
+                          "\(mode) 清屏后按钮应变成退出")
+            attach(app, "clean-on-\(mode)")
+            app.buttons["douyin.cleanScreen"].firstMatch.tap()
+            XCTAssertTrue(wait(label: "清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
+                          "\(mode) 再点一次应恢复")
+            XCTAssertTrue(app.buttons["douyin.more"].firstMatch.isHittable, "\(mode) 恢复后更多按钮应回来")
             app.terminate()
         }
     }

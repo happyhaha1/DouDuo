@@ -358,6 +358,14 @@ private struct DYEdgeBottomPanel<Panel: View>: View {
                             if height > 0 { shareContentHeight = height }
                         }
                 }
+                // 评论面板右滑收起：起手在面板上时先关面板，视频区右滑仍切关注流。
+                .simultaneousGesture(DragGesture(minimumDistance: 20)
+                    .onEnded { value in
+                        guard kind == .comments,
+                              abs(value.translation.width) > abs(value.translation.height),
+                              value.translation.width > 60 else { return }
+                        dismiss()
+                    })
                 .frame(width: panelWidth, height: panelHeight, alignment: .top)
                 .dyPanelGlass(in: shape)
                 .clipShape(shape)

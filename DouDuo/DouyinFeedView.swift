@@ -1265,6 +1265,29 @@ struct DYUpstreamFeedScreen: View {
         let safeTop = DYDuoMetrics.windowSafeTop
         return hSize == .regular ? safeTop : safeTop - 80
     }
+    /// 清屏按钮与经典布局同位置：右上角，和顶栏/侧栏入口同一行。
+    private var cleanTopPadding: CGFloat {
+        // Duo 外屏右上角是系统状态区，触摸会被系统截走，按钮必须落在它下面；
+        // 其他机型贴着状态栏下沿即可（整层忽略了顶部安全区，坐标从物理屏最上沿算）。
+        DYDuoMetrics.isDuoHardware ? 140 : max(DYDuoMetrics.windowSafeTop, 8) + 4
+    }
+
+    /// 默认 / 简洁 / 极简模式没有系统工具栏，自己画一颗和经典布局外观一致的清屏按钮。
+    private var cleanToggle: some View {
+        Button {
+            withAnimation(.snappy) { cleanScreen.toggle() }
+        } label: {
+            Image(systemName: cleanScreen ? "eye" : "eye.slash")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(theme.media.onMedia.color(for: scheme))
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(cleanScreen ? "退出清屏" : "清屏")
+        .accessibilityIdentifier("douyin.cleanScreen")
+    }
     /// 顶栏可用宽度：评论栏从右侧滑出时 = 视频区宽度，顶栏跟着视频居中、自适应收紧（默认模式用）
     @State private var topBarWidth: CGFloat?
     @State private var topChrome = CGRect.zero
@@ -1282,6 +1305,8 @@ struct DYUpstreamFeedScreen: View {
     /// 自动测试用：DOUDUO_OPEN=player 直接打开列表播放器（验证返回键与左缘右滑退出）
     @State private var debugPlayer = false
     @State private var playbackPressHeld = false
+    /// 默认 / 简洁 / 极简模式的清屏：只收系统界面（顶栏、侧栏、页码环、状态栏），视频与弹幕照常。
+    @State private var cleanScreen = false
     @ObservedObject private var network = DDNetworkPolicy.shared
     @AppStorage("douyin_hide_status_bar_v1") private var hideStatusBar = false
     @AppStorage(DDVideoQualityPolicy.defaultKey) private var defaultQuality = "auto"
@@ -1312,20 +1337,32 @@ struct DYUpstreamFeedScreen: View {
                         Color.clear.preference(key: DYTopChromeFrameKey.self, value: proxy.frame(in: .named("douduo.feed")))
                     }
                 }
-                .opacity(playbackPressHeld ? 0 : 1)
-                .allowsHitTesting(!playbackPressHeld)
+                .opacity(playbackPressHeld || cleanScreen ? 0 : 1)
+                .allowsHitTesting(!playbackPressHeld && !cleanScreen)
+                .accessibilityHidden(cleanScreen)
+            }
+
+            // 清屏按钮直接挂在 ZStack 上，和顶栏/侧栏走同一套命中测试；
+            // overlay 那一层收不到点击（其余 overlay 都是纯展示）。
+            if !playbackPressHeld, tab != .live {
+                cleanToggle
+                    .modifier(DDChromeOpacity(.top))
+                    .padding(.trailing, 8 + insets.trailing)
+                    .padding(.top, cleanTopPadding)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
         }
+        .environment(\.duoCleanScreen, cleanScreen)
         .overlayPreferenceValue(DYFeedRailPreference.self) { entries in
             if railMode {
                 let entry = entries.first { $0.tab == tab && (tab != .recommend || $0.id == currentID) }
                 rootActionRail(entry, selector: false)
-                    .opacity(playbackPressHeld ? 0 : 1)
-                    .accessibilityHidden(playbackPressHeld)
+                    .opacity(playbackPressHeld || cleanScreen ? 0 : 1)
+                    .accessibilityHidden(playbackPressHeld || cleanScreen)
             }
         }
         .overlay {
-            if railMode, !playbackPressHeld, !(tab == .live && (live.clean || live.entered)) {
+            if railMode, !playbackPressHeld, !cleanScreen, !(tab == .live && (live.clean || live.entered)) {
                 if tab == .live, layoutAModuleAnchor.active, feedHost.width > 1 {
                     layoutAModuleButton
                         .modifier(DDChromeOpacity(.top))
@@ -1335,7 +1372,7 @@ struct DYUpstreamFeedScreen: View {
             }
         }
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
-        .statusBarHidden(playbackPressHeld || hideStatusBar)
+        .statusBarHidden(playbackPressHeld || hideStatusBar || cleanScreen)
         .onPreferenceChange(DYTopChromeFrameKey.self) { next in
             guard abs(next.maxY - topChrome.maxY) > 0.5 || abs(next.minY - topChrome.minY) > 0.5 else { return }
             topChrome = next
@@ -2038,7 +2075,7 @@ struct DYUpstreamFeedScreen: View {
     /// 极简模式：视频进度画成包住圆形入口的外圈。从 12 点方向顺时针走；拖动进度时变粗变亮。
     /// 进度每 0.25 秒更新一次：只让这颗小视图订阅 DDRailProgress，别挂在根视图上（否则整屏跟着重算，1.3.13 卡顿主因）。
     private var railProgressRing: some View {
-        DDRailProgressRing(show: chromeMode.usesRail && tab != .live,
+        DDRailProgressRing(show: chromeMode.usesRail && tab != .live && !cleanScreen,
                            fg: theme.media.onMedia.color(for: scheme))
     }
 
@@ -2675,13 +2712,17 @@ struct DYVideoPage: View {
     var onEnded: (() -> Void)? = nil
     var onShowFollowing: (() -> Void)? = nil
     var onNavigateLeft: (() -> Void)? = nil
+    /// 右侧评论 / UP 主页展开时，右滑先收回面板（经典布局用）
+    var panelOpen: Bool = false
+    var onClosePanel: (() -> Void)? = nil
     init(item: DYAweme, isCurrent: Bool, isNext: Bool = false, insets: EdgeInsets, resume: Double?, liked: Bool, collected: Bool,
          onLike: @escaping () -> Void, onCollect: @escaping () -> Void, onDoubleTap: @escaping () -> Void,
          onComments: @escaping () -> Void, onSearch: @escaping () -> Void = {}, onAuthor: @escaping () -> Void, onSavePosition: @escaping (Double) -> Void,
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil, moreExtras: AnyView = AnyView(EmptyView()),
          onEnded: (() -> Void)? = nil,
-         onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil, onBack: (() -> Void)? = nil) {
+         onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil, onBack: (() -> Void)? = nil,
+         panelOpen: Bool = false, onClosePanel: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.isNext = isNext; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
         self.onLike = onLike; self.onCollect = onCollect; self.onDoubleTap = onDoubleTap
@@ -2691,6 +2732,8 @@ struct DYVideoPage: View {
         self.onEnded = onEnded
         self.onShowFollowing = onShowFollowing
         self.onNavigateLeft = onNavigateLeft
+        self.panelOpen = panelOpen
+        self.onClosePanel = onClosePanel
         self.onSearch = onSearch; self.moreExtras = moreExtras; self.onBack = onBack
     }
 
@@ -2700,7 +2743,8 @@ struct DYVideoPage: View {
                 liked: liked, collected: collected, onLike: onLike, onCollect: onCollect,
                 onDoubleTap: onDoubleTap, onComments: onComments, onAuthor: onAuthor,
                 onSavePosition: onSavePosition, preloader: preloader, bridge: bridge, onToast: onToast,
-                onDislike: onDislike, onEnded: onEnded, onShowFollowing: onShowFollowing, onNavigateLeft: onNavigateLeft)
+                onDislike: onDislike, onEnded: onEnded, onShowFollowing: onShowFollowing, onNavigateLeft: onNavigateLeft,
+                panelOpen: panelOpen, onClosePanel: onClosePanel)
         } else {
             DYUpstreamVideoPage(item: item, isCurrent: isCurrent, isNext: isNext, insets: insets, resume: resume,
                 liked: liked, collected: collected, onLike: onLike, onCollect: onCollect,
@@ -3140,6 +3184,15 @@ struct DYClassicFeedScreen: View {
                 }
                 .frame(width: layout.paneSize.width, height: layout.paneSize.height)
                 .clipped()
+                // 右滑收面板：视频上起手的右滑仍切关注流，起手落在评论/UP 主页上时先收回面板。
+                .simultaneousGesture(DragGesture(minimumDistance: 14)
+                    .onEnded { value in
+                        guard abs(value.translation.width) > abs(value.translation.height),
+                              value.translation.width > 60 else { return }
+                        withAnimation(.snappy) {
+                            if authorTarget != nil { authorTarget = nil } else { showComments = false }
+                        }
+                    })
                 .overlay(alignment: .leading) {
                     if layout.sideBySide { Color(uiColor: .separator).frame(width: 0.5) }
                 }
@@ -3463,7 +3516,9 @@ struct DYClassicFeedScreen: View {
                            onToast: { showToast($0) },
                            onDislike: { dislike(item.id) },
                            onEnded: { playNext(after: item.id) },
-                           onShowFollowing: { selectTab(.follow) })
+                           onShowFollowing: { selectTab(.follow) },
+                           panelOpen: authorTarget != nil || showComments,
+                           onClosePanel: { withAnimation(.snappy) { authorTarget = nil; showComments = false } })
     }
 
     /// 点赞：先本地乐观更新，再调抖音网页接口，按服务端返回决定成败
@@ -3583,6 +3638,7 @@ struct DYClassicFeedScreen: View {
                 .pickerStyle(.menu)
             } label: { Label(qualityMenuTitle, systemImage: "sparkles.tv") }
             .accessibilityIdentifier("douyin.quick.quality")
+            DYDanmakuOptions()
             Button("个性化与播放", systemImage: "slider.horizontal.3") { showPersonalization = true }
                 .accessibilityIdentifier("douyin.personalization")
             Button("刷新推荐", systemImage: "arrow.clockwise") {
@@ -3644,6 +3700,8 @@ struct DYUpstreamVideoPage: View {
     }
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
+    /// 默认三档模式的清屏：只收本页常驻界面，视频和弹幕不动。
+    @Environment(\.duoCleanScreen) private var cleanScreen
 
     let item: DYAweme
     let isCurrent: Bool
@@ -3765,8 +3823,9 @@ struct DYUpstreamVideoPage: View {
                     // 简洁/极简没有底部进度条（进度画在入口外圈），底部不用再给它留 36pt（issue #4）
                     .padding(.bottom, max(insets.bottom, 18) + (item.images.isEmpty ? 8 : 24))
                 }
-                .opacity(pressHeld ? 0 : 1)
-                .accessibilityHidden(pressHeld)
+                .opacity(pressHeld || cleanScreen ? 0 : 1)
+                .accessibilityHidden(pressHeld || cleanScreen)
+                .allowsHitTesting(!pressHeld && !cleanScreen)
                 .animation(.easeOut(duration: 0.15), value: pressHeld)
             } else {
                 // 默认：左下信息 + 右侧按钮栏。
@@ -3784,13 +3843,14 @@ struct DYUpstreamVideoPage: View {
                 }
                 .padding(.horizontal, chromeSidePadding)
                 .padding(.bottom, max(insets.bottom, 18) + (item.images.isEmpty ? 36 : 24) - (onBack != nil && hSize == .compact ? 40 : 0))
-                .opacity(pressHeld ? 0 : 1)
-                .accessibilityHidden(pressHeld)
+                .opacity(pressHeld || cleanScreen ? 0 : 1)
+                .accessibilityHidden(pressHeld || cleanScreen)
+                .allowsHitTesting(!pressHeld && !cleanScreen)
                 .animation(.easeOut(duration: 0.15), value: pressHeld)
             }
         }
         .overlay(alignment: .bottom) {
-            if showDanmakuInput {
+            if showDanmakuInput, !cleanScreen {
                 danmakuBar.padding(.bottom, max(insets.bottom, 12) + 6)
                     .opacity(pressHeld ? 0 : 1)
                     .allowsHitTesting(!pressHeld)
@@ -4185,6 +4245,9 @@ struct DYClassicVideoPage: View {
     var onEnded: (() -> Void)? = nil
     var onShowFollowing: (() -> Void)? = nil
     var onNavigateLeft: (() -> Void)? = nil
+    /// 右侧评论 / UP 主页展开时，右滑先收回面板，而不是切到关注流。
+    var panelOpen: Bool = false
+    var onClosePanel: (() -> Void)? = nil
     @State private var authorImage: UIImage?
     @State private var followedOverride: Bool?
     @State private var followBusy = false
@@ -4220,7 +4283,8 @@ struct DYClassicVideoPage: View {
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil,
          onEnded: (() -> Void)? = nil,
-         onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil) {
+         onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil,
+         panelOpen: Bool = false, onClosePanel: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
         self.onLike = onLike; self.onCollect = onCollect; self.onDoubleTap = onDoubleTap
@@ -4230,6 +4294,8 @@ struct DYClassicVideoPage: View {
         self.onEnded = onEnded
         self.onShowFollowing = onShowFollowing
         self.onNavigateLeft = onNavigateLeft
+        self.panelOpen = panelOpen
+        self.onClosePanel = onClosePanel
     }
 
     var body: some View {
@@ -4265,7 +4331,10 @@ struct DYClassicVideoPage: View {
                                     headEndSeconds: nil,
                                     continuationURL: nil,
                                     onSwipeLeft: { if !cleanScreen { (onNavigateLeft ?? onAuthor)() } },
-                                    onSwipeRight: { if !cleanScreen { onShowFollowing?() } },
+                                    onSwipeRight: {
+                                        if cleanScreen { return }
+                                        if panelOpen { onClosePanel?() } else { onShowFollowing?() }
+                                    },
                                     onContextMenu: { if !cleanScreen { showOptions = true } })
                     .environment(\.duoContentInsets, contentInsets)
             } else {

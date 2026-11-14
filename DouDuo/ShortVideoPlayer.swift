@@ -428,8 +428,10 @@ struct PlayerPage: View {
                 }
                 .scaleEffect(videoScale)
                 .allowsHitTesting(false)
-            if !cleanScreen && isActive && (!danmaku.isEmpty || dmStress) {
+            // 清屏只收系统界面，弹幕属于内容：经典布局常驻清屏，弹幕不该跟着消失。
+            if isActive && (!danmaku.isEmpty || dmStress) {
                 DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
+                    .modifier(DDDanmakuDebugMarker(count: danmaku.count))
             }
             // 手势层铺满整页（含视频上下黑边）：单击 / 双击 / 长按，竖滑漏给分页（横滑不再改进度）
             if player != nil || vlc != nil { gestures }
@@ -1672,4 +1674,20 @@ extension AVPlayer {
 /// 用户自己按的暂停是明确意图，不能被生命周期回调覆盖。
 enum DYResumePolicy {
     static func shouldResumeAfterBackground(userPaused: Bool) -> Bool { !userPaused }
+}
+
+/// 调试/自动测试用：把当前弹幕条数暴露成一个可查询的无障碍元素，Release 里什么也不做。
+private struct DDDanmakuDebugMarker: ViewModifier {
+    let count: Int
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        content
+            .accessibilityElement()
+            .accessibilityIdentifier("douyin.danmaku.layer")
+            .accessibilityValue("\(count)")
+        #else
+        content
+        #endif
+    }
 }
