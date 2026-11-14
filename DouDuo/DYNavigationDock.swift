@@ -5,21 +5,18 @@ enum DYMainTab: String, CaseIterable, Hashable {
     case mine = "我的", messages = "私信", home = "首页"
 }
 
-/// Let the system compress tabs before video actions when its shared vertical
-/// column runs out of room. The expanded selector remains a native TabView.
+/// The tab selector is app-level: whatever the chrome mode, it must stay a
+/// native, always-visible TabView and never be auto-minimized on first layout.
 struct DYSystemTabBar: ViewModifier {
     var hidden = false
-    @AppStorage(DDChromeMode.key) private var mode = DDChromeMode.classic.rawValue
     @ViewBuilder func body(content: Content) -> some View {
-        if #available(iOS 27.1, *), mode == DDChromeMode.duoClassic.rawValue {
+        if #available(iOS 27.1, *) {
             content.toolbarVisibility(hidden ? .hidden : .visible, for: .tabBar)
-                // 展开内屏冷启动时纵向空间还没量准，prefersToolbarItems 会让
-                // 系统先压掉标签栏、只留工具栏按钮，等一次交互才恢复；
-                // 因此互动胶囊必须留在列里，压缩时也不许整列为空。
                 .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
                 .toolbarBackgroundVisibility(.hidden, for: .bottomBar)
-                // 内屏展开态冷启动时，系统会把底部选择器先折叠成小胶囊，
-                // 要等一次交互才恢复；两种最小化接口都钉成 never。
+                // 内屏展开态冷启动时纵向空间还没量准，系统会先把底部选择器
+                // 折叠/压掉，等一次交互才恢复；两种最小化接口在所有档位都
+                // 钉成 never，冷启动与折叠/展开切换时保持一致。
                 .tabBarMinimizeBehavior(.never)
                 .toolbarMinimizationBehavior(.never, for: .tabBar)
         } else { content }

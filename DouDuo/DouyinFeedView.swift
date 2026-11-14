@@ -2792,7 +2792,13 @@ struct DYVideoPage: View {
 struct DouyinFeedScreen: View {
     @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     var body: some View {
-        if #available(iOS 27.1, *), chromeModeRaw == DDChromeMode.duoClassic.rawValue {
+        shell.id(chromeModeRaw)
+    }
+
+    /// 所有界面档位共用同一个 TabView 外壳：iPhone Duo 展开内屏时，系统的
+    /// 竖向标签栏只在外壳里存在；档位只决定首页那一格画什么。
+    @ViewBuilder private var shell: some View {
+        if #available(iOS 27.1, *) {
             DYClassicFeedScreen()
         } else {
             DYUpstreamFeedScreen()
@@ -2849,6 +2855,7 @@ struct DYClassicFeedScreen: View {
     @State private var lastFeedPull = Date.distantPast
     @AppStorage(DYVideoCache.countKey) private var cacheCount = DYVideoCache.defaultCount
     @State private var mainTab: DYMainTab = .home
+    @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     @State private var visibleVideo: DYAweme?
     @State private var cleanScreen = false
     private var showMine: Bool {
@@ -3111,27 +3118,8 @@ struct DYClassicFeedScreen: View {
             }
             .badge(noticeUnread)
             Tab("首页", systemImage: "house", value: DYMainTab.home) {
-                NavigationStack {
-                    layoutRoot
-                        .coordinateSpace(.named("douduo.feed"))
-                        .environment(\.duoSystemBars, true)
-                        .environment(\.duoInlineVideoNavigation, sidePanelOpen)
-                        .environment(\.duoVisibleVideo, $visibleVideo)
-                        .environment(\.duoCleanScreen, cleanScreen)
-                        .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
-                            DYNativeVideoActions(actions: actions,
-                                                 hidesActions: hidesVideoChrome,
-                                                 isClean: cleanScreen,
-                                                 onToggleClean: { cleanScreen.toggle() })
-                        }
-                        .toolbarVisibility(liveRoomOpen ? .hidden : .visible, for: .navigationBar)
-                        .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
-                        .toolbarMinimizationBehavior(.never, for: .navigationBar)
-                        .scrollEdgeEffectHidden(true, for: .all)
-                        // 底部导航只随直播房间收起；清屏、评论区、UP 主页都不再收，冷启动与折叠/展开切换时保持一致。
-                        .modifier(DYSystemTabBar(hidden: liveRoomOpen))
-                }
-                .tint(nil)
+                NavigationStack { homeContent }
+                    .tint(nil)
             }
         }
         // Only the tab selector inherits this accent. Every tab restores the
@@ -3142,6 +3130,33 @@ struct DYClassicFeedScreen: View {
         .onChange(of: mainTab) { _, selected in
             saveSession()
             if selected != .home { DDPlayback.shared.pauseAll(reason: .cover) }
+        }
+    }
+
+    /// 首页那一格：经典档位画 Duo 分栏，其余档位画原来的默认布局。
+    /// 两者共用外壳的标签栏、清屏状态和工具栏列。
+    @ViewBuilder private var homeContent: some View {
+        if chromeModeRaw == DDChromeMode.duoClassic.rawValue {
+            layoutRoot
+                .coordinateSpace(.named("douduo.feed"))
+                .environment(\.duoSystemBars, true)
+                .environment(\.duoInlineVideoNavigation, sidePanelOpen)
+                .environment(\.duoVisibleVideo, $visibleVideo)
+                .environment(\.duoCleanScreen, cleanScreen)
+                .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
+                    DYNativeVideoActions(actions: actions,
+                                         hidesActions: hidesVideoChrome,
+                                         isClean: cleanScreen,
+                                         onToggleClean: { cleanScreen.toggle() })
+                }
+                .toolbarVisibility(liveRoomOpen ? .hidden : .visible, for: .navigationBar)
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
+                .toolbarMinimizationBehavior(.never, for: .navigationBar)
+                .scrollEdgeEffectHidden(true, for: .all)
+                // 底部导航只随直播房间收起；清屏、评论区、UP 主页都不再收，冷启动与折叠/展开切换时保持一致。
+                .modifier(DYSystemTabBar(hidden: liveRoomOpen))
+        } else {
+            DYUpstreamFeedScreen()
         }
     }
 

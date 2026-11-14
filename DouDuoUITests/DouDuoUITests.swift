@@ -855,7 +855,8 @@ final class DouDuoUITests: XCTestCase {
 
     func testTopBarHitEdges() throws {
         let app = XCUIApplication()
-        app.launchEnvironment["DOUDUO_CHROME_MODE"] = "duoClassic"
+        // 默认档位才有顶栏「我的 / 私信」按钮；经典档位这两项是右侧系统标签栏。
+        app.launchEnvironment["DOUDUO_CHROME_MODE"] = "classic"
         app.launchArguments += ["-douyin_muted_v1", "YES"]
         app.launch()
         let info = app.buttons["douyin.messages.top"]
@@ -872,14 +873,17 @@ final class DouDuoUITests: XCTestCase {
         print("DDHIT after-live-edge tab-\(app.staticTexts["live.currentID"].exists)")
         attach(app, "hit-live-edge")
         tapEdge(info, dx: 0.5, dy: 0.94)
-        XCTAssertTrue(app.buttons["douyin.messages.back"].waitForExistence(timeout: 20), app.debugDescription)
+        // 默认档位的私信是全屏浮层（`douyin.messages.root`，右上角 chevron.down 收起），经典档位才是标签页 + 返回键。
+        XCTAssertTrue(app.otherElements["douyin.messages.root"].waitForExistence(timeout: 20),
+                      "消息底边点按应打开私信")
         print("DDHIT info-bottom-edge ok")
-        app.buttons["douyin.messages.back"].tap()
+        app.buttons["返回"].firstMatch.tap()
         let mine = app.buttons["douyin.mine.top"]
         tapEdge(mine, dx: 0.5, dy: 0.94)
-        XCTAssertTrue(app.buttons["douyin.mine.back"].waitForExistence(timeout: 20), app.debugDescription)
+        let mineList = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'douyin.mine.' AND identifier != 'douyin.mine.top'")).firstMatch
+        XCTAssertTrue(mineList.waitForExistence(timeout: 20), "我的底边点按应打开我的页")
         print("DDHIT mine-bottom-edge ok")
-        app.buttons["douyin.mine.back"].tap()
+        app.buttons["返回"].firstMatch.tap()
         let recommend = app.buttons.matching(NSPredicate(format: "label == '推荐'")).firstMatch
         tapEdge(recommend, dx: 0.5, dy: 0.94)
         let current = app.staticTexts["douyin.currentID"]
@@ -1200,7 +1204,7 @@ final class DouDuoUITests: XCTestCase {
         sleep(5)
         return app
     }
-    /// 四档布局的清屏按钮必须是同一颗（经典那颗眼睛），位置一致，进出清屏都不位移。
+    /// 四档布局：右侧导航栏都在，清屏按钮是同一颗（经典那颗眼睛），位置一致，进出清屏都不位移。
     func testDefaultChromeModesToggleCleanScreen() throws {
         continueAfterFailure = false
         for mode in ["classic", "rail", "minimal", "default"] {
@@ -1209,8 +1213,8 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertTrue(clean.waitForExistence(timeout: 10), "\(mode) 应有清屏按钮")
             XCTAssertTrue(clean.isHittable, "\(mode) 清屏按钮应可点")
             let resting = clean.frame
-            // 只有本来就有系统标签栏的档位（Duo 经典）才要验证清屏之后它还在。
-            let navBefore = app.buttons["首页"].firstMatch.exists
+            // 四档共用同一个标签外壳，右侧导航（首页 / 私信 / 我的）冷启动就该在。
+            XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 10), "\(mode) 右侧导航应在")
             attach(app, "clean-off-\(mode)")
             clean.tap()
             // 点完要重新取一次快照，旧句柄的 label 不会自己刷新。
@@ -1219,10 +1223,8 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertEqual(exit.frame.minX, resting.minX, accuracy: 1, "\(mode) 清屏后按钮横向位移")
             XCTAssertEqual(exit.frame.minY, resting.minY, accuracy: 1, "\(mode) 清屏后按钮纵向位移")
             attach(app, "clean-on-\(mode)")
-            // 清屏只收顶栏/侧栏/页码环，底部导航不该被收走（系统收起/展开有动画，要等它回来）。
-            if navBefore {
-                XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 10), "\(mode) 清屏时底部导航仍在")
-            }
+            // 清屏只收顶栏/侧栏/页码环，右侧导航不该被收走（系统动画期间要等它回来）。
+            XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 10), "\(mode) 清屏时右侧导航仍在")
             app.buttons["douyin.cleanScreen"].firstMatch.tap()
             XCTAssertTrue(wait(label: "清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
                           "\(mode) 再点一次应恢复")
