@@ -1804,17 +1804,24 @@ final class DouDuoUITests: XCTestCase {
     func testLivePlayback() throws {
         let app = XCUIApplication()
         app.launchEnvironment["DOUDUO_STARTLIVE"] = "1"
+        app.launchArguments += ["-douyin_live_cover_only_v1", "YES"]
         app.launch()
         let liveID = app.staticTexts["live.currentID"]
         XCTAssertTrue(liveID.waitForExistence(timeout: 30), "直播页没打开")
         XCTAssertEqual(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label != '-'"), evaluatedWith: liveID)], timeout: 60), .completed, "直播列表没加载出来")
+        let enter = app.buttons["live.room.enter"].firstMatch
+        XCTAssertTrue(enter.waitForExistence(timeout: 5), "默认直播列表应停在封面")
+        XCTAssertEqual(app.staticTexts["live.status"].label, "0", "进入前不能自动拉流")
+        enter.tap()
         sleep(8)
         let st = app.staticTexts["live.status"].label
-        let rate = app.staticTexts["live.rate"].label
         let t = app.staticTexts["live.time"].label
-        print("DDTEST live id=\(liveID.label) status=\(st) rate=\(rate) time=\(t)")
+        print("DDTEST live id=\(liveID.label) status=\(st) time=\(t)")
         attach(app, "live")
         XCTAssertEqual(st, "1", "直播流没 ready（status=\(st)）")
+        app.buttons["live.room.close"].tap()
+        XCTAssertTrue(enter.waitForExistence(timeout: 5))
+        XCTAssertTrue(wait(label: "0", on: app.staticTexts["live.status"], timeout: 5), "退出房间必须停流")
     }
 
     /// 点赞 / 收藏走真接口。

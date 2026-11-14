@@ -133,6 +133,8 @@ actor DYVideoCache {
     /// async 方法里不直接引用 DYAweme 作为参数类型（该编译器在此处解析失败），改用它中转
     private var pending: [String: DYAweme] = [:]
     private let session: URLSession
+    /// 省流开关变化时取消在飞的预载（省流下不该再拉整条）
+    private var policyObserver: NSObjectProtocol?
 
     init() {
         let cfg = URLSessionConfiguration.default
@@ -152,6 +154,12 @@ actor DYVideoCache {
         } else {
             heads = []
         }
+
+        policyObserver = NotificationCenter.default.addObserver(
+            forName: DDNetworkPolicyKeys.changed, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.policyChanged() }
+        }
     }
 
     /// 播放焦点变了：只预取「后面几条」，不动正在播的这一条。
@@ -160,6 +168,11 @@ actor DYVideoCache {
     /// 所以缓存覆盖率不变；只有列表末尾（后面没有可预取的）才回落到缓存当前条。
     func focus(current: DYAweme?, ahead: [DYAweme]) {
         guard Self.limit > 0 else { job?.cancel(); job = nil; jobID = nil; return }
+        // 省流：一条都不下；起播靠播放器自己的 1 秒缓冲，预热交给 AVPlayer 预载
+        if DDNetworkPolicy.isSavingDataNow {
+            stopCaching()
+            return
+        }
         let follow = Array(ahead.prefix(Self.headPrefetch))
         let target = follow.isEmpty ? current : nil
         guard target != nil || !follow.isEmpty else { return }
@@ -185,9 +198,17 @@ actor DYVideoCache {
         job?.cancel(); job = nil; jobID = nil
     }
 
+    /// 省流打开就立刻停掉在飞的整条下载；关掉后由下一次 focus 重新排队。
+    private func policyChanged() {
+        guard DDNetworkPolicy.isSavingDataNow else { return }
+        stopCaching()
+    }
+
     /// 只缓存整条视频：不再存「头部」，也就没有「头部播完接在线流」那一下切换
     /// （切换必然有一瞬闪烁/缓冲，长痛不如短痛）
     private func store(id: String) async {
+        // 省流下一条都不下：策略刚切换时这里立刻退出，别把整条拉下来
+        guard !DDNetworkPolicy.isSavingDataNow else { return }
         guard let a = pending[id], a.images.isEmpty, a.play != nil else { return }
         if Self.localURL(a.id) != nil { return }
         if failed.contains(a.id) { return }

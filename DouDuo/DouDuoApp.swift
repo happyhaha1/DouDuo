@@ -16,11 +16,20 @@ final class DouDuoAppDelegate: NSObject, UIApplicationDelegate {
         DDPlayback.shared.resumeAll()
     }
 
+    /// 方向锁：只返回窗口可旋转的掩码，不接管 SwiftUI 布局；折叠/分屏的 GeometryProxy 不受影响。
+    /// UIKit 的这个回调在主线程；assumeIsolated 让 @MainActor 的会话状态在 Swift 5 语言模式下安全读取。
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        MainActor.assumeIsolated { DDPlaybackSession.shared.supportedInterfaceOrientations }
+    }
+
     #if DEBUG
     private let _launch = DDLaunch.t0
     #endif
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // 启动即读取方向锁透明度、启动静音与音量解除偏好；只读，绝不写手动静音 douyin_muted_v1。
+        MainActor.assumeIsolated { _ = DDPlaybackSession.shared }
         #if DEBUG
         // 自动测试用：DOUDUO_CHROME_MODE=classic|rail|minimal 启动时写入界面模式（不用 -key 启动参数，那会盖住运行时修改）
         if let m = ProcessInfo.processInfo.environment["DOUDUO_CHROME_MODE"] { UserDefaults.standard.set(m, forKey: "douyin_chrome_mode_v1") }

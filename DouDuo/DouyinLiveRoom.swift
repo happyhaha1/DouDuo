@@ -56,6 +56,8 @@ final class DYLiveModel: ObservableObject {
     @Published var entered = false
     /// 「发现更多」面板展开（在挑直播间）：不播任何直播，免得后台挂着一个还在出声
     var browsing = false
+    /// 省流 / 「只显示封面」时停在封面：没进直播间就不拉流，进了才开局。
+    @Published private(set) var previewStandby = false
     /// 手动选的清晰度（nil = 自动，用抖音给的默认）；全局记住，换直播间也沿用
     @Published var quality: String? = UserDefaults.standard.string(forKey: "douyin_live_quality_v1")
     /// 这个直播间有的清晰度，高到低
@@ -73,17 +75,13 @@ final class DYLiveModel: ObservableObject {
     }
     @Published var muted = false {
         didSet {
-            vlc.outputMuted = muted
-            if !muted, sessionReleased {
-                if activatePlaybackSession() {
-                    vlc.reopenAudioOutput()
-                    sessionReleased = false
-                }
-            } else {
-                vlc.mediaPlayer.audio?.isMuted = muted
-            }
+            // 点「解除静音」时先解掉本次启动静音，不然声音仍被启动策略压着
+            if !muted, DDPlaybackSession.shared.isStartupMuted { DDPlaybackSession.shared.endStartupMute() }
+            applyOutputMute()
         }
     }
+    /// 最终出声开关：房间手动静音与「本次启动静音」取 OR，绝不写回 douyin_muted_v1
+    private var outputMuted: Bool { muted || DDPlaybackSession.shared.isStartupMuted }
     let vlc = VLCPlayerController()
     private var requestGeneration = UUID()
     private var loadedRoom: String?
@@ -113,6 +111,9 @@ final class DYLiveModel: ObservableObject {
     var isFollowedCatalog: Bool { followedOnly }
     /// 关注分类里的当前房间还没有播放地址时，界面用它重新解析这一间。
     @Published private(set) var catalogResolveNonce = 0
+
+    private var previewSink: AnyCancellable?
+    private var startupMuteSink: AnyCancellable?
 
     private struct SavedLiveFeed {
         var rooms: [DYLiveRoom]
@@ -167,8 +168,8 @@ final class DYLiveModel: ObservableObject {
             guard let self else { return }
             if self.suspended {
                 self.reapplyBackgroundMuteIfNeeded()
-            } else if self.vlc.mediaPlayer.audio?.isMuted != DYLivePlaybackGate.foregroundOutputMuted(userMuted: self.muted) {
-                self.vlc.mediaPlayer.audio?.isMuted = DYLivePlaybackGate.foregroundOutputMuted(userMuted: self.muted)
+            } else if self.vlc.mediaPlayer.audio?.isMuted != DYLivePlaybackGate.foregroundOutputMuted(userMuted: self.outputMuted) {
+                self.vlc.mediaPlayer.audio?.isMuted = DYLivePlaybackGate.foregroundOutputMuted(userMuted: self.outputMuted)
             }
             guard !self.ready, self.loadedRoom != nil, time > 0,
                   self.liveCanProgress,
@@ -190,6 +191,17 @@ final class DYLiveModel: ObservableObject {
             self.playbackError = "直播已结束或连接中断，可重试或上滑换台"
             self.ready = false
         }
+        // 省流 / 只显示封面切换时重算是否停在封面
+        previewSink = DDNetworkPolicy.shared.$isPreviewDeferred
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.refreshPreviewStandby() }
+            }
+        // 启动静音被解除（UI 或系统音量变化）后立刻让声音出来
+        startupMuteSink = DDPlaybackSession.shared.$isStartupMuted
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.applyOutputMute() }
+            }
     }
 
     func load(_ bridge: DouyinBridge, reset: Bool = false) async {
@@ -231,6 +243,9 @@ final class DYLiveModel: ObservableObject {
     func play(_ room: DYLiveRoom?) {
         guard let room else { return }
         roomRef = room
+        // 封面模式（省流 / 只显示封面）：没进直播间不拉流，进了才由 enterRoom 开局
+        refreshPreviewStandby()
+        guard !previewStandby else { stop(); return }
         let restart = loadedRoom != room.id || DYLivePlaybackGate.shouldRestartSameRoom(
             state: playbackState(), ready: ready, hasMedia: vlc.mediaPlayer.media != nil)
         let applicationActive = UIApplication.shared.applicationState == .active
@@ -276,6 +291,31 @@ final class DYLiveModel: ObservableObject {
         if allowed, applicationActive { suspended = false }
         return allowed && !suspended
     }
+    /// 封面模式：省流或「只显示封面」时，未进直播间停在封面，不自动拉流。
+    private func refreshPreviewStandby() {
+        let standby = !entered && DDNetworkPolicy.shared.isPreviewDeferred
+        guard standby != previewStandby else { return }
+        previewStandby = standby
+        if standby {
+            if loadedRoom != nil { stop() }
+        } else if loadedRoom == nil, visible, !suspended, let room = roomRef {
+            play(room)
+        }
+    }
+
+    /// 最终输出静音：房间手动静音与「本次启动静音」取 OR，绝不写回 douyin_muted_v1。
+    private func applyOutputMute() {
+        let mute = outputMuted
+        vlc.outputMuted = mute
+        if !mute, sessionReleased, activatePlaybackSession() {
+            vlc.reopenAudioOutput()
+            vlc.mediaPlayer.audio?.volume = 100
+            sessionReleased = false
+        } else {
+            vlc.mediaPlayer.audio?.isMuted = mute
+            if !mute { vlc.mediaPlayer.audio?.volume = 100 }
+        }
+    }
 
     private var backgroundSoundEnabled: Bool {
         UserDefaults.standard.bool(forKey: DYLiveBackgroundSound.storageKey)
@@ -287,7 +327,7 @@ final class DYLiveModel: ObservableObject {
         return DYLivePlaybackGate.retainsAudioSession(
             visible: visible,
             hasMedia: vlc.mediaPlayer.media != nil,
-            userMuted: muted,
+            userMuted: outputMuted,
             backgroundSound: backgroundSoundEnabled,
             interrupted: audioInterrupted)
     }
@@ -327,10 +367,10 @@ final class DYLiveModel: ObservableObject {
         }
         guard first else { return }
         captureBackgroundInput()
-        let outputMuted = audioInterrupted || DYLivePlaybackGate.backgroundOutputMuted(
-            userMuted: muted, backgroundSound: backgroundSoundEnabled)
-        vlc.outputMuted = outputMuted
-        vlc.mediaPlayer.audio?.isMuted = outputMuted
+        let shouldMute = audioInterrupted || DYLivePlaybackGate.backgroundOutputMuted(
+            userMuted: outputMuted, backgroundSound: backgroundSoundEnabled)
+        vlc.outputMuted = shouldMute
+        vlc.mediaPlayer.audio?.isMuted = shouldMute
         if wantsBackgroundAudioSession {
             if activatePlaybackSession() { sessionReleased = false }
         } else {
@@ -421,7 +461,7 @@ final class DYLiveModel: ObservableObject {
 
     /// 回到前台时只恢复进房静音。会话被释放过且用户没静音时，重开音轨，不换媒体。
     private func applyForegroundAudio(reopenTrack: Bool) {
-        let output = DYLivePlaybackGate.foregroundAudio(userMuted: muted, sessionReleased: reopenTrack)
+        let output = DYLivePlaybackGate.foregroundAudio(userMuted: outputMuted, sessionReleased: reopenTrack)
         vlc.outputMuted = output.muted
         if output.reopenTrack {
             vlc.reopenAudioOutput()
@@ -470,7 +510,7 @@ final class DYLiveModel: ObservableObject {
     private func reapplyBackgroundMuteIfNeeded() {
         guard suspended, DDPlayback.shared.pauseReason == .background else { return }
         let shouldMute = audioInterrupted || DYLivePlaybackGate.backgroundOutputMuted(
-            userMuted: muted, backgroundSound: backgroundSoundEnabled)
+            userMuted: outputMuted, backgroundSound: backgroundSoundEnabled)
         guard vlc.mediaPlayer.audio?.isMuted != shouldMute else { return }
         vlc.mediaPlayer.audio?.isMuted = shouldMute
     }
@@ -501,7 +541,7 @@ final class DYLiveModel: ObservableObject {
         startedAt = ProcessInfo.processInfo.systemUptime
         let sessionOK = activatePlaybackSession()
         if sessionOK { sessionReleased = false }
-        vlc.outputMuted = DYLivePlaybackGate.foregroundOutputMuted(userMuted: muted)
+        vlc.outputMuted = DYLivePlaybackGate.foregroundOutputMuted(userMuted: outputMuted)
         let flv = source.isFLV
         vlc.onMediaAssigned = { [weak self] in
             self?.armSourceTimeout(generation: generation, flv: flv)
@@ -571,11 +611,15 @@ final class DYLiveModel: ObservableObject {
     }
     func enterRoom() {
         entered = true; clean = false
+        // 封面模式下还没拉过流，进房就用当前这一路开局
+        refreshPreviewStandby()
         Self.log("DDLIVE_ENTER room=\(currentID ?? "-") reused=true")
     }
     func leaveRoom() {
         guard visit.followed, let saved = savedFeed else {
             entered = false; clean = false
+            // 回到封面模式就别把预览流留在后台继续拉
+            refreshPreviewStandby()
             Self.log("DDLIVE_LEAVE room=\(currentID ?? "-") reused=true")
             return
         }
@@ -592,6 +636,8 @@ final class DYLiveModel: ObservableObject {
         fetchedAt = saved.fetchedAt
         entered = false
         clean = false
+        // 关注列表现已恢复成浏览态：封面模式下 play(restored) 会被直接挡掉并停流
+        refreshPreviewStandby()
         playbackError = nil
         visit.replaceFeed(ids: rooms.map(\.id), currentID: currentID, zoneID: zone?.id)
         Self.log("DDLIVE_LEAVE followed=1 restored=\(rooms.count)")
@@ -662,6 +708,7 @@ final class DYLiveModel: ObservableObject {
     private var warmed = Set<URL>()
     func warmNeighbors() {
         guard let id = currentID, let i = rooms.firstIndex(where: { $0.id == id }) else { return }
+        guard !previewStandby else { return }
         let ids = [i + 1, i + 2, i - 1].filter { rooms.indices.contains($0) }
         for idx in ids {
             guard let source = rooms[idx].liveStreams.first, warmed.insert(source.url).inserted else { continue }
@@ -1860,7 +1907,7 @@ private struct DYLiveRoomPage: View {
                 if isCurrent && !model.entered {
                     Color.clear.contentShape(Rectangle()).onTapGesture { model.enterRoom() }
                 }
-                if isCurrent, !model.ready || model.playbackError != nil {
+                if isCurrent, !model.previewStandby, !model.ready || model.playbackError != nil {
                     VStack(spacing: 10) {
                         if let error = model.playbackError {
                             Text(error).font(.footnote).multilineTextAlignment(.center)

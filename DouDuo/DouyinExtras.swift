@@ -432,8 +432,12 @@ extension DouyinBridge {
 
 // MARK: - 弹幕调度策略
 
-/// 仅影响视频滚动弹幕：上方三分之一、密度限流与短时间相同内容去重。
+/// 仅影响视频滚动弹幕：上方三分之一、字号 / 行数、密度限流与短时间相同内容去重。
+/// 行数 0 = 自动（1/3 区域内该字号放得下的行数，再受密度上限约束），1...10 = 手动上限；
+/// 两种模式都会被「上方 1/3 区域 - 顶部安全区」的实际高度截断：字号越大，最多可容纳的行数越少。
 fileprivate enum DYDanmakuPolicy {
+    /// `laneHeight` 是 15pt 字号（默认）的轨道高度；其它字号用 `laneHeight(fitting:)` 同比缩放，大字不会挤在一起。
+    static let baseFontSize: CGFloat = 15
     static let laneHeight: CGFloat = 28
     static let gap: CGFloat = 28
     static let densityKey = "douyin_video_danmaku_density_v1"
@@ -455,12 +459,21 @@ fileprivate enum DYDanmakuPolicy {
     struct Region { let top: CGFloat; let bottom: CGFloat; let lanes: Int }
     struct Placed { let d: DYDanmaku; let lane: Int; let width: CGFloat; let dur: Double }
 
-    static func region(height: CGFloat, topInset: CGFloat, density: Density) -> Region {
+    static func laneHeight(fitting fontSize: CGFloat) -> CGFloat {
+        let size = fontSize.isFinite ? min(max(fontSize, 10), 28) : baseFontSize
+        return (size * DYDanmakuPolicy.laneHeight / DYDanmakuPolicy.baseFontSize).rounded()
+    }
+
+    /// lanes = min(手动行数或密度上限, 上方 1/3 区域内该字号实际放得下的行数)。
+    static func region(height: CGFloat, topInset: CGFloat, density: Density,
+                       fontSize: CGFloat = 15, lines: Int = 0) -> Region {
         guard height.isFinite, height >= 0, topInset.isFinite else { return Region(top: 0, bottom: 0, lanes: 0) }
         let bottom = height / 3
         let top = max(0, topInset) + 64
-        let available = max(0, ((bottom - top) / laneHeight).rounded(.down))
-        return Region(top: top, bottom: bottom, lanes: Int(min(CGFloat(density.maxLanes), available)))
+        let lane = laneHeight(fitting: fontSize)
+        let fitted = Int(max(0, ((bottom - top) / lane).rounded(.down)))
+        let limit = lines > 0 ? min(lines, 10) : density.maxLanes
+        return Region(top: top, bottom: bottom, lanes: min(limit, fitted))
     }
 
     static func normalized(_ text: String) -> String {
@@ -468,10 +481,18 @@ fileprivate enum DYDanmakuPolicy {
             .split(whereSeparator: { $0.isWhitespace }).joined()
     }
 
+    /// 文字宽估算基准：15pt 时 6pt 内边距 + 半角 9pt / 全角 16pt，其余字号同比缩放。
+    static func estimatedWidth(_ text: String, fontSize: CGFloat) -> CGFloat {
+        let size = fontSize.isFinite ? min(max(fontSize, 10), 28) : DYDanmakuPolicy.baseFontSize
+        let scale = size / DYDanmakuPolicy.baseFontSize
+        return text.unicodeScalars.reduce(6 * scale) { $0 + ($1.value < 0x2E80 ? 9 : 16) * scale }
+    }
+
     static func layout(_ items: [DYDanmaku], w: CGFloat, lanes: Int, speed: CGFloat,
-                       density: Density, deduplicate: Bool) -> [Placed] {
+                       density: Density, deduplicate: Bool,
+                       fontSize: CGFloat = 15) -> [Placed] {
         guard w.isFinite, w > 0, speed.isFinite, speed > 0, lanes > 0 else { return [] }
-        var free = Array(repeating: -Double.infinity, count: min(lanes, density.maxLanes))
+        var free = Array(repeating: -Double.infinity, count: min(lanes, 10))
         var out: [Placed] = []
         var seenIDs = Set<String>(), lastShown: [String: Double] = [:]
         var second = -Double.infinity, inSecond = 0
@@ -486,12 +507,43 @@ fileprivate enum DYDanmakuPolicy {
             if bucket != second { second = bucket; inSecond = 0 }
             guard inSecond < density.maxPerSecond,
                   let lane = free.indices.first(where: { free[$0] <= d.offset }) else { continue }
-            let width = d.text.unicodeScalars.reduce(CGFloat(6)) { $0 + ($1.value < 0x2E80 ? 9 : 16) }
+            let width = estimatedWidth(d.text, fontSize: fontSize)
             free[lane] = d.offset + Double((width + gap) / speed)
             out.append(Placed(d: d, lane: lane, width: width, dur: Double((w + width) / speed)))
             seenIDs.insert(d.id); lastShown[text] = d.offset; inSecond += 1
         }
         return out
+    }
+}
+
+/// 视频弹幕个性化设置的持久化契约：更多菜单与设置页共用同一批 key / 默认值 / 取值范围。
+enum DYDanmakuSettings {
+    static let fontSizeKey = "douyin_danmaku_font_size_v1"
+    static let linesKey = "douyin_danmaku_lines_v1"
+    static let opacityKey = "douyin_danmaku_opacity_v1"
+    static let inClearKey = "douyin_danmaku_in_clear_v1"
+
+    static let defaultFontSize: Double = 15
+    static let defaultLines: Int = 0
+    static let defaultOpacity: Double = 0.92
+    static let defaultInClear: Bool = true
+
+    static let fontSizeRange: ClosedRange<Double> = 10...28
+    static let linesRange: ClosedRange<Int> = 0...10
+    static let opacityRange: ClosedRange<Double> = 0.1...1
+
+    /// 菜单里的常用档位；设置页用 `fontSizeRange` / `opacityRange` 做精确滑块。
+    static let fontSizeChoices: [Double] = [10, 12, 15, 18, 22, 26, 28]
+    static let opacityChoices: [Double] = [1, 0.92, 0.8, 0.6, 0.4, 0.1]
+
+    static func fontSizeValue(_ raw: Double) -> Double {
+        raw.isFinite ? min(max(raw, fontSizeRange.lowerBound), fontSizeRange.upperBound) : defaultFontSize
+    }
+    static func linesValue(_ raw: Int) -> Int {
+        min(max(raw, linesRange.lowerBound), linesRange.upperBound)
+    }
+    static func opacityValue(_ raw: Double) -> Double {
+        raw.isFinite ? min(max(raw, opacityRange.lowerBound), opacityRange.upperBound) : defaultOpacity
     }
 }
 
@@ -501,6 +553,24 @@ struct DYDanmakuOptions: View {
     @AppStorage("douyin_danmaku_v1") private var enabled = true
     @AppStorage(DYDanmakuPolicy.densityKey) private var density = DYDanmakuPolicy.Density.standard.rawValue
     @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
+    @AppStorage(DYDanmakuSettings.fontSizeKey) private var fontSize = DYDanmakuSettings.defaultFontSize
+    @AppStorage(DYDanmakuSettings.linesKey) private var lines = DYDanmakuSettings.defaultLines
+    @AppStorage(DYDanmakuSettings.opacityKey) private var opacity = DYDanmakuSettings.defaultOpacity
+    @AppStorage(DYDanmakuSettings.inClearKey) private var inClear = DYDanmakuSettings.defaultInClear
+
+    private var currentDensity: DYDanmakuPolicy.Density { DYDanmakuPolicy.Density(rawValue: density) ?? .standard }
+    private var fontPoint: Int { Int(DYDanmakuSettings.fontSizeValue(fontSize).rounded()) }
+    private var opacityPercent: Int { Int((DYDanmakuSettings.opacityValue(opacity) * 100).rounded()) }
+    private var fontSizeChoices: [Double] {
+        let current = DYDanmakuSettings.fontSizeValue(fontSize)
+        return DYDanmakuSettings.fontSizeChoices.contains(current)
+            ? DYDanmakuSettings.fontSizeChoices : [current] + DYDanmakuSettings.fontSizeChoices
+    }
+    private var opacityChoices: [Double] {
+        let current = DYDanmakuSettings.opacityValue(opacity)
+        return DYDanmakuSettings.opacityChoices.contains(current)
+            ? DYDanmakuSettings.opacityChoices : [current] + DYDanmakuSettings.opacityChoices
+    }
 
     var body: some View {
         Menu {
@@ -510,18 +580,33 @@ struct DYDanmakuOptions: View {
             }
             Toggle("显示弹幕", isOn: $enabled)
                 .accessibilityIdentifier("douyin.danmaku.enabled")
+            Toggle("清屏时显示", isOn: $inClear)
+                .accessibilityIdentifier("douyin.danmaku.inClear")
             Picker("弹幕密度", selection: $density) {
                 ForEach(DYDanmakuPolicy.Density.allCases) { option in Text(option.title).tag(option.rawValue) }
             }
             .accessibilityIdentifier("douyin.danmaku.density")
+            Picker("弹幕字号", selection: $fontSize) {
+                ForEach(fontSizeChoices, id: \.self) { size in Text("\(Int(size)) pt").tag(size) }
+            }
+            .accessibilityIdentifier("douyin.danmaku.fontSize")
+            Picker("弹幕行数", selection: $lines) {
+                Text("自动").tag(0)
+                ForEach(1...10, id: \.self) { count in Text("最多 \(count) 行").tag(count) }
+            }
+            .accessibilityIdentifier("douyin.danmaku.lines")
+            Picker("弹幕透明度", selection: $opacity) {
+                ForEach(opacityChoices, id: \.self) { value in Text("\(Int((value * 100).rounded()))%").tag(value) }
+            }
+            .accessibilityIdentifier("douyin.danmaku.opacity")
             Toggle("10秒内重复去重", isOn: $deduplicate)
                 .accessibilityIdentifier("douyin.danmaku.deduplicate")
-            Text("显示区域：屏幕上方 1/3")
+            Text("显示区域：屏幕上方 1/3（高度不够时自动减行）")
         } label: {
-            Label("弹幕 · \((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)", systemImage: "text.bubble")
+            Label("弹幕 · \(currentDensity.title) · \(fontPoint)pt", systemImage: "text.bubble")
         }
         .accessibilityIdentifier("douyin.danmaku.settings")
-        .accessibilityValue("\((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)，去重\(deduplicate ? "开启" : "关闭")")
+        .accessibilityValue("\(currentDensity.title)，字号\(fontPoint)pt，行数\(lines == 0 ? "自动" : "最多\(lines)行")，透明度\(opacityPercent)%，清屏\(inClear ? "显示" : "隐藏")，去重\(deduplicate ? "开启" : "关闭")")
     }
 }
 
@@ -554,7 +639,7 @@ struct DYDanmakuClock {
 }
 
 /// 抖音同款滚动弹幕：所有弹幕同一速度从右往左飘（同速 → 同一轨道里后面的永远追不上前面的）。
-/// 轨道按「前一条尾巴已经完全进屏 + 间距」分配，整条视频一次排好（布局只在弹幕列表 / 屏幕宽变化时重算）；
+/// 轨道按「前一条尾巴已经完全进屏 + 间距」分配，整条视频一次排好（布局只在弹幕列表 / 屏幕宽 / 字号变化时重算）；
 /// 某个时刻所有轨道都满就丢掉这一条（抖音也是这样）。
 /// 位置用 TimelineView(.animation) 逐帧算（跟屏幕刷新率走，ProMotion 上 120Hz），不靠 SwiftUI 补间动画。
 struct DYDanmakuLayer: View {
@@ -563,6 +648,17 @@ struct DYDanmakuLayer: View {
     let topInset: CGFloat
     @AppStorage(DYDanmakuPolicy.densityKey) private var densityRaw = DYDanmakuPolicy.Density.standard.rawValue
     @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
+    @AppStorage(DYDanmakuSettings.fontSizeKey) private var fontSizeRaw = DYDanmakuSettings.defaultFontSize
+    @AppStorage(DYDanmakuSettings.linesKey) private var linesRaw = DYDanmakuSettings.defaultLines
+    @AppStorage(DYDanmakuSettings.opacityKey) private var opacityRaw = DYDanmakuSettings.defaultOpacity
+    @AppStorage(DYDanmakuSettings.inClearKey) private var visibleInClear = DYDanmakuSettings.defaultInClear
+    @Environment(\.dyClearScreen) private var clearScreen
+
+    private var fontSize: CGFloat { CGFloat(DYDanmakuSettings.fontSizeValue(fontSizeRaw)) }
+    private var lines: Int { DYDanmakuSettings.linesValue(linesRaw) }
+    private var opacity: Double { DYDanmakuSettings.opacityValue(opacityRaw) }
+    /// 清屏隐藏手机 UI 时是否一并隐藏弹幕；默认保留（清屏后弹幕照常滚动）。
+    private var hiddenByClearScreen: Bool { clearScreen.wrappedValue && !visibleInClear }
 
     private var renderItems: [DYDanmaku] {
         #if DEBUG
@@ -574,44 +670,52 @@ struct DYDanmakuLayer: View {
     }
 
     var body: some View {
-        GeometryReader { g in
-            let w = g.size.width
-            let density = DYDanmakuPolicy.Density(rawValue: densityRaw) ?? .standard
-            let region = DYDanmakuPolicy.region(height: g.size.height, topInset: topInset, density: density)
-            let speed = (w + 200) / 7
-            let placed = DYDanmakuLayout.shared.get(renderItems, w: w, lanes: region.lanes, speed: speed,
-                                                  density: density, deduplicate: deduplicate)
-            TimelineView(.animation(minimumInterval: nil, paused: !clock.playing)) { ctx in
-                let t = clock.now(ctx.date)
-                Canvas(rendersAsynchronously: false) { gc, _ in
-                    var regionContext = gc
-                    regionContext.clip(to: Path(CGRect(x: 0, y: region.top, width: w, height: max(0, region.bottom - region.top))))
-                    for p in placed where t >= p.d.offset && t <= p.d.offset + p.dur {
-                        let x = w - CGFloat(t - p.d.offset) * speed
-                        let y = region.top + CGFloat(p.lane) * DYDanmakuPolicy.laneHeight
-                        guard let sym = regionContext.resolveSymbol(id: p.d.id) else { continue }
-                        regionContext.draw(sym, at: CGPoint(x: x, y: y), anchor: .topLeading)
+        Group {
+            if hiddenByClearScreen {
+                Color.clear
+            } else {
+                GeometryReader { g in
+                    let w = g.size.width
+                    let density = DYDanmakuPolicy.Density(rawValue: densityRaw) ?? .standard
+                    let region = DYDanmakuPolicy.region(height: g.size.height, topInset: topInset,
+                                                        density: density, fontSize: fontSize, lines: lines)
+                    let lane = DYDanmakuPolicy.laneHeight(fitting: fontSize)
+                    let speed = (w + 200) / 7
+                    let placed = DYDanmakuLayout.shared.get(renderItems, w: w, lanes: region.lanes, speed: speed,
+                                                          density: density, deduplicate: deduplicate, fontSize: fontSize)
+                    TimelineView(.animation(minimumInterval: nil, paused: !clock.playing)) { ctx in
+                        let t = clock.now(ctx.date)
+                        Canvas(rendersAsynchronously: false) { gc, _ in
+                            var regionContext = gc
+                            regionContext.clip(to: Path(CGRect(x: 0, y: region.top, width: w, height: max(0, region.bottom - region.top))))
+                            for p in placed where t >= p.d.offset && t <= p.d.offset + p.dur {
+                                let x = w - CGFloat(t - p.d.offset) * speed
+                                let y = region.top + CGFloat(p.lane) * lane
+                                guard let sym = regionContext.resolveSymbol(id: p.d.id) else { continue }
+                                regionContext.draw(sym, at: CGPoint(x: x, y: y), anchor: .topLeading)
+                            }
+                        } symbols: {
+                            // 只排版一次，逐帧移动贴图；区域外再裁剪，避免遮挡下方内容。
+                            ForEach(placed, id: \.d.id) { p in
+                                Text(p.d.text)
+                                    .font(.system(size: fontSize, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(opacity))
+                                    .shadow(color: .black.opacity(0.7), radius: 1.5, y: 1)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .tag(p.d.id)
+                            }
+                        }
                     }
-                } symbols: {
-                    // 只排版一次，逐帧移动贴图；区域外再裁剪，避免遮挡下方内容。
-                    ForEach(placed, id: \.d.id) { p in
-                        Text(p.d.text)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .shadow(color: .black.opacity(0.7), radius: 1.5, y: 1)
-                            .lineLimit(1)
-                            .fixedSize()
-                            .tag(p.d.id)
-                    }
+                    .frame(width: w, height: g.size.height)
                 }
             }
-            .frame(width: w, height: g.size.height)
         }
         .allowsHitTesting(false)
     }
 }
 
-/// 精确缓存输入和设置：中间一条内容变化、密度/去重切换均立即重排。
+/// 精确缓存输入和设置：中间一条内容变化、密度 / 去重 / 字号切换均立即重排。
 @MainActor private final class DYDanmakuLayout {
     static let shared = DYDanmakuLayout()
     private struct Key: Equatable {
@@ -621,14 +725,18 @@ struct DYDanmakuLayer: View {
         let speed: CGFloat
         let density: DYDanmakuPolicy.Density
         let deduplicate: Bool
+        let fontSize: CGFloat
     }
     private var key: Key?
     private var cache: [DYDanmakuPolicy.Placed] = []
     func get(_ items: [DYDanmaku], w: CGFloat, lanes: Int, speed: CGFloat,
-             density: DYDanmakuPolicy.Density, deduplicate: Bool) -> [DYDanmakuPolicy.Placed] {
-        let next = Key(items: items, w: w, lanes: lanes, speed: speed, density: density, deduplicate: deduplicate)
+             density: DYDanmakuPolicy.Density, deduplicate: Bool,
+             fontSize: CGFloat) -> [DYDanmakuPolicy.Placed] {
+        let next = Key(items: items, w: w, lanes: lanes, speed: speed, density: density,
+                       deduplicate: deduplicate, fontSize: fontSize)
         if key != next {
-            cache = DYDanmakuPolicy.layout(items, w: w, lanes: lanes, speed: speed, density: density, deduplicate: deduplicate)
+            cache = DYDanmakuPolicy.layout(items, w: w, lanes: lanes, speed: speed,
+                                           density: density, deduplicate: deduplicate, fontSize: fontSize)
             key = next
         }
         return cache

@@ -136,8 +136,6 @@ class MenuPolicyTests(unittest.TestCase):
         settings = menu_content(menu, "设置")
         playback = menu_content(settings, "播放设置")
         # 2026-11-12 老板定：倍速/自动连播放「更多」第一层，铺满放右侧按钮栏，设置·播放设置里不再重复
-        self.assertIn("$muted", playback)
-        self.assertEqual(menu.count("$muted"), 1)
         for gone in ("$autoNext", "$feed.autoFit", "播放速度"):
             self.assertNotIn(gone, playback)
             self.assertNotIn(gone, menu)
@@ -169,6 +167,9 @@ class MenuPolicyTests(unittest.TestCase):
         # Compile production properties + policy/fill/pick/remix/trim, excluding all network code.
         model = FEED[FEED.index("final class DYFeedModel:"):FEED.index("    func loadMore(_ bridge:")]
         model += "}\n"
+        model = model.replace("UserDefaults.standard", "preferences")
+        preference_source = (ROOT / "DouDuo/DDPlaybackPreferences.swift").read_text()
+        time_filter = block(preference_source, "enum DDRecommendationTimeFilter")
         clamp = block(FEED, "private extension Double")
         adapters = r'''
 import Foundation
@@ -193,6 +194,7 @@ struct DYAweme {
     var images: [String] = []
     var isTallFrame: Bool = false
     var duration: Double = 60
+    var publishedAt: TimeInterval? = nil
 }
 '''
         checks = r'''
@@ -261,7 +263,7 @@ print("PASS \(scenarios) legacy/orientation combinations; scarcity fallback; str
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="menu-policy-", dir=scratch) as folder:
             source = Path(folder) / "Policy.swift"
-            source.write_text(adapters + model + clamp + checks)
+            source.write_text(adapters + time_filter + "\n" + model + clamp + checks)
             result = subprocess.run(["swift", str(source)], text=True, capture_output=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         print(result.stdout.strip())

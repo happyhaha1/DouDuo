@@ -40,6 +40,8 @@ struct DYAweme: Identifiable, Codable, Equatable, Sendable {
     var publishedAt: TimeInterval? = nil
     /// 保留平台返回的 AI 声明原文；没有标记不代表非 AI。
     var aiDeclaration: String? = nil
+    /// 每个真实可用的码率档；旧会话缺失时仍使用原播放地址。
+    var qualitySources: [DDVideoQuality]? = nil
 
     func publicationText(now: Date = Date()) -> String? {
         guard let publishedAt, publishedAt.isFinite, publishedAt > 0,
@@ -55,8 +57,8 @@ struct DYAweme: Identifiable, Codable, Equatable, Sendable {
         return formatter.string(from: Date(timeIntervalSince1970: publishedAt)) + " 发布"
     }
 
-    func metadataText(now: Date = Date()) -> String? {
-        let parts = [publicationText(now: now), aiDeclaration?.trimmingCharacters(in: .whitespacesAndNewlines)]
+    func metadataText(now: Date = Date(), includePublication: Bool = true) -> String? {
+        let parts = [includePublication ? publicationText(now: now) : nil, aiDeclaration?.trimmingCharacters(in: .whitespacesAndNewlines)]
             .compactMap { $0 }.filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -829,6 +831,10 @@ final class DouyinBridge: NSObject, ObservableObject, WKNavigationDelegate {
         playFast: fast && fast !== (best || def) ? fast : null,
         q: (br ? (br.gear_name || '?') + ' ' + resOf(br) + 'p h265=' + (br.is_h265 ? 1 : 0) + ' ' + Math.round((br.bit_rate || 0) / 1000) + 'k' : 'nolist')
           + ' | def ' + (pd.width || 0) + 'x' + (pd.height || 0) + ' | gears ' + (v.bit_rate || []).map(r => (r.gear_name || '?') + ':' + Math.round((r.bit_rate || 0) / 1000) + 'k' + (r.is_h265 ? 'h' : '')).join(','),
+        qualitySources: (v.bit_rate || []).filter(r => r && r.play_addr && pickPlay(r.play_addr.url_list)).map(r => ({
+          url: pickPlay(r.play_addr.url_list), alternate: pickRedirect(r.play_addr.url_list),
+          height: resOf(r), bitrate: r.bit_rate || 0, isHEVC: !!r.is_h265
+        })).filter((r, i, all) => all.findIndex(other => other.url === r.url) === i),
         cover: first(v.cover) || first(v.origin_cover) || (a.images && a.images[0] && first(a.images[0])) || null,
         images: (a.images || []).map(i => first(i)).filter(Boolean),
         author: { name: (a.author && a.author.nickname) || '', avatar: a.author && first(a.author.avatar_thumb), secUid: a.author && a.author.sec_uid, uid: a.author && a.author.uid ? String(a.author.uid) : null, follow: a.author ? (a.author.follow_status || 0) : 0 },
@@ -961,7 +967,7 @@ final class DYPreloader {
     func update(_ items: [DYAweme], current index: Int) {
         guard !disabled, items.indices.contains(index) else { return }
         let th = ProcessInfo.processInfo.thermalState
-        let ahead = th == .nominal ? Self.ahead : (th == .fair ? 1 : 0)
+        let ahead = min(th == .nominal ? Self.ahead : (th == .fair ? 1 : 0), DDNetworkPolicy.shared.isSavingData ? 1 : Self.ahead)
         let lo = index + 1, hi = min(items.count - 1, index + ahead)
         let window = lo <= hi ? Array(items[lo...hi]) : []
         let ids = Set(window.map(\.id))
@@ -969,15 +975,16 @@ final class DYPreloader {
         for (id, p) in players where !ids.contains(id) { release(id, p) }
         let near = Set(items[max(0, index - 1)...min(items.count - 1, index + 1)].map(\.id))
         handedOut = handedOut.filter { near.contains($0) || ids.contains($0) }
+        let preference = UserDefaults.standard.string(forKey: DDVideoQualityPolicy.defaultKey) ?? "auto"
         for a in window where players[a.id] == nil && !handedOut.contains(a.id) {
-            guard a.images.isEmpty, let s = a.play, let url = URL(string: s) else {
+            let selected = DDVideoQualityPolicy.select(a, preference: preference, savingData: DDNetworkPolicy.shared.isSavingData)
+            guard a.images.isEmpty, let s = selected?.url, let url = URL(string: s) else {
                 if let c = a.images.first.flatMap(URL.init(string:)) { Task { _ = await ImageCache.shared.load(c) } }
                 continue
             }
-            let asset = DYMedia.asset(DYVideoCache.localURL(a.id) ?? url)
+            let asset = DYMedia.asset(preference == "auto" && !DDNetworkPolicy.shared.isSavingData ? (DYVideoCache.localURL(a.id) ?? url) : url)
             let item = AVPlayerItem(asset: asset)
-            // 预载项不播、只把开头缓冲好：留够 6 秒，滑到时 play() 立刻出画（3 秒在弱网下就会等）
-            item.preferredForwardBufferDuration = 6
+            item.preferredForwardBufferDuration = DDNetworkPolicy.shared.isSavingData ? 1 : 6
             let p = AVPlayer(playerItem: item)
             p.isMuted = true
             p.automaticallyWaitsToMinimizeStalling = true
@@ -1059,6 +1066,12 @@ final class DYFeedModel: ObservableObject {
     /// 从候选池按比例往列表里排最多 maxN 条；relaxed = 比例凑不齐时也照原顺序放（别让列表断粮）
     @discardableResult
     func fill(_ maxN: Int, relaxed: Bool = false) -> Int {
+        let defaults = UserDefaults.standard
+        let unit = defaults.string(forKey: DDRecommendationTimeFilter.unitKey) ?? "off"
+        let value = defaults.object(forKey: DDRecommendationTimeFilter.valueKey) as? Int ?? 7
+        let undated = defaults.object(forKey: DDRecommendationTimeFilter.undatedKey) as? Bool ?? true
+        let now = Date()
+        pool.removeAll { !DDRecommendationTimeFilter.includes($0.publishedAt, unit: unit, value: value, includeUndated: undated, now: now) }
         var n = 0
         while n < maxN, !pool.isEmpty {
             var idx: Int?
@@ -1224,6 +1237,7 @@ struct DouyinFeedScreen: View {
     @State private var authorTarget: DYAweme.Author?
     @Environment(\.horizontalSizeClass) private var hSize
     @AppStorage("douyin_muted_v1") private var muted = false
+    @ObservedObject private var playbackSession = DDPlaybackSession.shared
     @State private var pendingUpdate: DDUpdate?
     @State private var showMessages = false
     /// 盖在视频上的页面（我的/信息/搜索/作者）打开时，所有视频和直播都停
@@ -1250,6 +1264,12 @@ struct DouyinFeedScreen: View {
     @State private var debugPlayer = false
     @State private var playbackPressHeld = false
     @State private var clearScreen = false
+    @ObservedObject private var network = DDNetworkPolicy.shared
+    @AppStorage("douyin_hide_status_bar_v1") private var hideStatusBar = false
+    @AppStorage(DDVideoQualityPolicy.defaultKey) private var defaultQuality = "auto"
+    @AppStorage(DDRecommendationTimeFilter.unitKey) private var recentUnit = "off"
+    @AppStorage(DDRecommendationTimeFilter.valueKey) private var recentValue = 7
+    @AppStorage(DDRecommendationTimeFilter.undatedKey) private var includeUndated = true
 
     private var currentIndex: Int? { currentID.flatMap { id in feed.items.firstIndex { $0.id == id } } }
     private var current: DYAweme? { currentIndex.map { feed.items[$0] } }
@@ -1263,6 +1283,7 @@ struct DouyinFeedScreen: View {
             if !railMode, !(tab == .live && (live.clean || live.entered)) {
                 VStack(spacing: 6) {
                     topBar
+                        .modifier(DDChromeOpacity(.top))
                 }
                 .padding(.top, hSize == .regular ? 0 : -80)
                 // 评论栏展开：顶栏只占视频那一块，跟着视频缩到左边。直播预览仍量这块的下沿。
@@ -1289,6 +1310,7 @@ struct DouyinFeedScreen: View {
             if railMode, !clearScreen, !playbackPressHeld, !(tab == .live && (live.clean || live.entered)) {
                 if tab == .live, layoutAModuleAnchor.active, feedHost.width > 1 {
                     layoutAModuleButton
+                        .modifier(DDChromeOpacity(.top))
                 } else {
                     rootActionRail(nil, selector: true)
                 }
@@ -1297,7 +1319,7 @@ struct DouyinFeedScreen: View {
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
         .environment(\.dyClearScreen, $clearScreen)
         .onChange(of: tab) { _, _ in clearScreen = false }
-        .statusBarHidden(playbackPressHeld || clearScreen)
+        .statusBarHidden(playbackPressHeld || clearScreen || hideStatusBar)
         .onPreferenceChange(DYTopChromeFrameKey.self) { next in
             guard abs(next.maxY - topChrome.maxY) > 0.5 || abs(next.minY - topChrome.minY) > 0.5 else { return }
             topChrome = next
@@ -1463,6 +1485,11 @@ struct DouyinFeedScreen: View {
         .onChange(of: feed.landscapeWhenWide) { _, _ in remixUpcoming() }
         .onChange(of: feed.shortRatioPortrait) { _, _ in remixUpcoming() }
         .onChange(of: feed.shortRatioLandscape) { _, _ in remixUpcoming() }
+        .onChange(of: recentUnit) { _, _ in remixUpcoming() }
+        .onChange(of: recentValue) { _, _ in remixUpcoming() }
+        .onChange(of: includeUndated) { _, _ in remixUpcoming() }
+        .onChange(of: network.isSavingData) { _, _ in preloader.clear(); focusCurrent() }
+        .onChange(of: defaultQuality) { _, _ in preloader.clear(); focusCurrent() }
         .onDisappear { live.stop(); preloader.clear() }
         .fullScreenCover(item: $web, onDismiss: {
             // 网页里可能登录 / 过了验证：重开签名页，先重新读登录态，再刷推荐
@@ -1970,6 +1997,7 @@ struct DouyinFeedScreen: View {
                     VStack(spacing: theme.media.actionGroupSpacing) {
                         if selector {
                             moduleMenu(edge: edge)
+                                .modifier(DDChromeOpacity(.top))
                         } else {
                             Color.clear.frame(height: 50).allowsHitTesting(false)
                         }
@@ -2374,7 +2402,10 @@ struct DouyinFeedScreen: View {
             .disabled(refreshing)
             Menu {
                 Menu {
-                    Toggle(isOn: $muted) { Label("静音", systemImage: "speaker.slash") }
+                    Toggle(isOn: Binding(get: { muted || playbackSession.isStartupMuted }, set: { value in
+                        if !value { playbackSession.endStartupMute() }
+                        muted = value
+                    })) { Label("静音", systemImage: "speaker.slash") }
                     Toggle(isOn: $bgPlay) { Label("后台播放（听书）", systemImage: "headphones") }
                 } label: { Label("播放设置", systemImage: "play.circle") }
                 Menu {
@@ -2484,6 +2515,7 @@ private struct DDRailProgressRing: View {
         .padding(lw / 2)
         .frame(width: d, height: d)
         .shadow(color: .black.opacity(0.25), radius: 1.5)
+        .modifier(DDChromeOpacity(.progress))
         .animation(.linear(duration: 0.25), value: railProgress.fraction)
         .allowsHitTesting(false)
         .accessibilityIdentifier("douyin.module.ring")
@@ -2647,6 +2679,14 @@ struct DYVideoPage: View {
     @AppStorage("douyin_playback_rate_v1") private var playbackRate = 1.0
     @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     private var chromeMode: DDChromeMode { DDChromeMode(rawValue: chromeModeRaw) ?? .classic }
+    @State private var showPersonalization = false
+    @State private var selectedQuality = ""
+    @State private var actualResolution = 0
+    @ObservedObject private var network = DDNetworkPolicy.shared
+    @ObservedObject private var playbackSession = DDPlaybackSession.shared
+    @AppStorage(DDVideoQualityPolicy.defaultKey) private var defaultQuality = "auto"
+    @AppStorage("douyin_show_music_v1") private var showMusic = true
+    @AppStorage("douyin_show_publication_v1") private var showPublication = true
     @ObservedObject private var peek = DDPeekInfo.shared
     /// 长按加速时右侧按钮/作者区淡出；这些控件按住也能触发加速（见 DYHoldBoost）。
     @StateObject private var boost = DYBoostControl()
@@ -2670,23 +2710,27 @@ struct DYVideoPage: View {
 
     var body: some View {
         let fg = theme.media.onMedia.color(for: scheme)
+        let preference = selectedQuality.isEmpty ? defaultQuality : selectedQuality
+        let selected = DDVideoQualityPolicy.select(item, preference: preference, savingData: network.isSavingData)
         ZStack(alignment: .bottomLeading) {
-            if item.images.isEmpty, let s = item.play, let remote = URL(string: s) {
-                // 只用「整条缓存」或「在线流」：不再走头部缓存 + 接续（那一下切换必然闪/卡）
-                let url = DYVideoCache.localURL(item.id) ?? remote
+            if item.images.isEmpty, let s = selected?.url, let remote = URL(string: s) {
+                // 显式选档绕过未标注画质的旧磁盘缓存，避免“最高画质”仍播放低清文件。
+                let useCache = preference == "auto" && !network.isSavingData
+                let url = useCache ? (DYVideoCache.localURL(item.id) ?? remote) : remote
                 // 复用影库播放器：双击、长按 2 倍速、竖滑切视频、底部可拖进度条（进度只认进度条）、VLC 兜底
                 PlayerPage.external(id: item.id, title: item.desc, url: url, durationSec: item.duration,
                                     isActive: isCurrent, isNext: isNext, topInset: insets.top, bottomInset: insets.bottom,
                                     resumePosition: resume, compactChrome: true,
-                                    preparedPlayer: { preloader.take(item.id) },
+                                    preparedPlayer: selectedQuality.isEmpty ? { preloader.take(item.id) } : nil,
                                     onEnded: autoNext ? onEnded : nil,
                                     onDoubleTap: onComments,
                                     onSavePosition: onSavePosition, onClose: {}, fillWidth: autoFit,
                                     danmaku: danmakuOn ? danmaku : [],
-                                    altURL: item.playAlt.flatMap(URL.init(string:)),
-                                    quality: item.q,
-                                    fastURL: item.playFast.flatMap(URL.init(string:)),
+                                    altURL: selected?.alternate.flatMap(URL.init(string:)) ?? item.playAlt.flatMap(URL.init(string:)),
+                                    quality: selected?.title,
+                                    fastURL: preference == "auto" && !network.isSavingData ? item.playFast.flatMap(URL.init(string:)) : nil,
                                     posterURL: item.cover.flatMap(URL.init(string:)),
+                                    onResolution: { if isCurrent { actualResolution = $0 } },
                                     videoAspect: item.height > 0 ? item.width / item.height : 0,
                                     headEndSeconds: nil,
                                     continuationURL: nil,
@@ -2751,6 +2795,7 @@ struct DYVideoPage: View {
         .preference(key: DYFeedRailPreference.self, value: railEntry(fg))
         .onPreferenceChange(DYPlaybackPressKey.self) { pressHeld = $0 }
         .onChange(of: isCurrent) { _, c in if !c { showDanmakuInput = false; pressHeld = false } }
+        .sheet(isPresented: $showPersonalization, onDismiss: { DDPlayback.shared.releaseCover() }) { DDPlaybackPreferencesView() }
         // 弹幕：轮到这条时才拉（一次拉整条视频的）
         .task(id: isCurrent) {
             guard isCurrent, !danmakuLoaded, item.images.isEmpty, let b = bridge else { return }
@@ -2864,22 +2909,26 @@ struct DYVideoPage: View {
                 .modifier(DYHoldBoost(control: boost))
                 .accessibilityIdentifier("douyin.author")
             }
-            if let metadata = item.metadataText() {
+            .modifier(DDChromeOpacity(.author))
+            if let metadata = item.metadataText(includePublication: showPublication) {
                 Text(metadata)
                     .font(.subheadline)
                     .foregroundStyle(theme.media.onMediaSecondary.color(for: scheme))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("douyin.video.metadata")
+                    .modifier(DDChromeOpacity(.information))
             }
             if !item.desc.isEmpty {
                 DYExpandableTitle(text: item.desc, foreground: fg,
                                   secondary: theme.media.onMediaSecondary.color(for: scheme))
+                    .modifier(DDChromeOpacity(.information))
             }
-            if !item.music.isEmpty {
+            if showMusic, !item.music.isEmpty {
                 Label(item.music, systemImage: "music.note")
                     .font(.caption).lineLimit(1)
                     .foregroundStyle(theme.media.onMediaSecondary.color(for: scheme))
+                    .modifier(DDChromeOpacity(.information))
             }
         }
         .themeShadow(.mediaLabel)
@@ -2955,6 +3004,7 @@ struct DYVideoPage: View {
             clearScreenButton(fg)
         }
         .themeShadow(.mediaLabel)
+        .modifier(DDChromeOpacity(.controls))
     }
 
     private func clearScreenButton(_ fg: Color, dimmed: Bool = false) -> some View {
@@ -3043,6 +3093,29 @@ struct DYVideoPage: View {
                     Label("界面 · \(chromeMode.title)", systemImage: "rectangle.3.group")
                 }
                 .accessibilityIdentifier("douyin.quick.chrome")
+                if item.images.isEmpty {
+                    Menu {
+                        Picker("当前视频画质", selection: $selectedQuality) {
+                            Text("跟随默认设置").tag("")
+                            Text("自动（跟随省流）").tag("auto")
+                            Text("最高画质").tag("best")
+                            Text("省流画质").tag("low")
+                            ForEach(item.qualitySources ?? []) { source in Text(source.title).tag(source.url) }
+                        }
+                    } label: { Label(actualResolution > 0 ? "画质 · \(actualResolution)p" : "画质", systemImage: "sparkles.tv") }
+                    .accessibilityIdentifier("douyin.quick.quality")
+                }
+                Toggle(isOn: Binding(get: { playbackSession.orientationLocked },
+                                    set: { playbackSession.setOrientationLocked($0) })) {
+                    Label(playbackSession.orientationLocked ? "方向锁 · 已锁定" : "锁定屏幕方向",
+                          systemImage: playbackSession.orientationLocked ? "lock.fill" : "lock.open")
+                }
+                .accessibilityIdentifier("douyin.quick.orientationLock")
+                Button("个性化与播放", systemImage: "slider.horizontal.3") {
+                    DDPlayback.shared.pauseAll(reason: .cover)
+                    showPersonalization = true
+                }
+                    .accessibilityIdentifier("douyin.personalization")
             }
             if let onDislike {
                 Button("不感兴趣", systemImage: "hand.thumbsdown", role: .destructive) { onDislike() }

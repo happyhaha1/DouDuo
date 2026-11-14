@@ -31,9 +31,11 @@ func emit(_ value: Any) {
     print(String(data: data, encoding: .utf8)!)
 }
 fileprivate func placed(_ items: [DYDanmaku], lanes: Int = 6, speed: CGFloat = 10000,
-            density: DYDanmakuPolicy.Density = .dense, dedup: Bool = false, w: CGFloat = 390) {
+            density: DYDanmakuPolicy.Density = .dense, dedup: Bool = false, w: CGFloat = 390,
+            fontSize: CGFloat = 15) {
     let result = DYDanmakuPolicy.layout(items, w: w, lanes: lanes,
-                                      speed: speed, density: density, deduplicate: dedup)
+                                      speed: speed, density: density, deduplicate: dedup,
+                                      fontSize: fontSize)
     emit(result.map { p in
         ["id": p.d.id, "text": p.d.text, "offset": p.d.offset,
          "lane": p.lane, "width": Double(p.width), "dur": p.dur] as [String: Any]
@@ -42,16 +44,22 @@ fileprivate func placed(_ items: [DYDanmaku], lanes: Int = 6, speed: CGFloat = 1
 switch mode {
 case "region":
     var rows: [[String: Any]] = []
-    for height: CGFloat in [0, 80, 192, 240, 276, 300, 600, 844, 1200, 2400] {
+    for height: CGFloat in [0, 80, 192, 240, 276, 300, 600, 844, 926, 1200, 2400] {
         for inset: CGFloat in [-20, 0, 20, 59, 200] {
             for raw in 0...2 {
-                let d = DYDanmakuPolicy.Density(rawValue: raw)!
-                let r = DYDanmakuPolicy.region(height: height, topInset: inset, density: d)
-                rows.append(["height": Double(height), "inset": Double(inset), "density": raw,
-                             "top": Double(r.top), "bottom": Double(r.bottom), "lanes": r.lanes,
-                             "maxLanes": d.maxLanes, "maxPerSecond": d.maxPerSecond,
-                             "laneHeight": Double(DYDanmakuPolicy.laneHeight),
-                             "gap": Double(DYDanmakuPolicy.gap)])
+                for fontSize: CGFloat in [10, 15, 28] {
+                    for lines in [0, 3, 10] {
+                        let d = DYDanmakuPolicy.Density(rawValue: raw)!
+                        let r = DYDanmakuPolicy.region(height: height, topInset: inset, density: d,
+                                                       fontSize: fontSize, lines: lines)
+                        rows.append(["height": Double(height), "inset": Double(inset), "density": raw,
+                                     "fontSize": Double(fontSize), "lines": lines,
+                                     "top": Double(r.top), "bottom": Double(r.bottom), "lanes": r.lanes,
+                                     "maxLanes": d.maxLanes, "maxPerSecond": d.maxPerSecond,
+                                     "laneHeight": Double(DYDanmakuPolicy.laneHeight(fitting: fontSize)),
+                                     "gap": Double(DYDanmakuPolicy.gap)])
+                    }
+                }
             }
         }
     }
@@ -97,6 +105,54 @@ case "widths":
                      "dur": r.first?.dur ?? -1])
     }
     emit(rows)
+case "fontScale":
+    var rows: [[String: Any]] = []
+    for fontSize: CGFloat in [10, 12, 15, 18, 22, 26, 28] {
+        let r = DYDanmakuPolicy.layout([synthetic("font", "合成字号宽度测试需要足够长", 0)], w: 390,
+                    lanes: 1, speed: 100, density: .dense, deduplicate: false, fontSize: fontSize)
+        rows.append(["fontSize": Double(fontSize),
+                     "laneHeight": Double(DYDanmakuPolicy.laneHeight(fitting: fontSize)),
+                     "width": r.first.map { Double($0.width) } ?? -1,
+                     "dur": r.first?.dur ?? -1])
+    }
+    emit(rows)
+case "fontCollision":
+    placed((0..<200).map { synthetic("font-collision-\($0)", "字号放大后的长弹幕仍需保持尾部间距 \($0)", Double($0) * 0.1) },
+           lanes: 2, speed: 100, fontSize: 28)
+case "linesCap":
+    placed((0..<120).map { synthetic("lines-\($0)", "行数上限合成 \($0)", Double($0) * 0.3) },
+           lanes: 14, speed: 10)
+case "fontDefaults":
+    let items = [synthetic("default-a", "默认字号一致性", 0),
+                 synthetic("default-b", "第二行合成", 0.01)]
+    let implicit = DYDanmakuPolicy.layout(items, w: 390, lanes: 3, speed: 100,
+                                         density: .standard, deduplicate: true)
+    let explicit = DYDanmakuPolicy.layout(items, w: 390, lanes: 3, speed: 100,
+                                          density: .standard, deduplicate: true, fontSize: 15)
+    let implicitRegion = DYDanmakuPolicy.region(height: 844, topInset: 59, density: .standard)
+    let explicitRegion = DYDanmakuPolicy.region(height: 844, topInset: 59, density: .standard,
+                                                fontSize: 15, lines: 0)
+    let layoutRows: ([DYDanmakuPolicy.Placed]) -> [[String: Any]] = { placed in
+        placed.map { p -> [String: Any] in ["id": p.d.id, "lane": p.lane, "width": Double(p.width), "dur": p.dur] }
+    }
+    emit(["layout": layoutRows(implicit), "explicit": layoutRows(explicit),
+          "region": ["top": Double(implicitRegion.top), "bottom": Double(implicitRegion.bottom),
+                     "lanes": implicitRegion.lanes],
+          "explicitRegion": ["top": Double(explicitRegion.top), "bottom": Double(explicitRegion.bottom),
+                             "lanes": explicitRegion.lanes]])
+case "settingsClamp":
+    emit(["font": [DYDanmakuSettings.fontSizeValue(.nan), DYDanmakuSettings.fontSizeValue(.infinity),
+                   DYDanmakuSettings.fontSizeValue(5), DYDanmakuSettings.fontSizeValue(99),
+                   DYDanmakuSettings.fontSizeValue(18)],
+          "lines": [DYDanmakuSettings.linesValue(-5), DYDanmakuSettings.linesValue(0),
+                    DYDanmakuSettings.linesValue(4), DYDanmakuSettings.linesValue(99)],
+          "opacity": [DYDanmakuSettings.opacityValue(.nan), DYDanmakuSettings.opacityValue(0),
+                      DYDanmakuSettings.opacityValue(1.5), DYDanmakuSettings.opacityValue(0.62)],
+          "laneHeight": [DYDanmakuPolicy.laneHeight(fitting: 4),
+                         DYDanmakuPolicy.laneHeight(fitting: .nan),
+                         DYDanmakuPolicy.laneHeight(fitting: 10),
+                         DYDanmakuPolicy.laneHeight(fitting: 28),
+                         DYDanmakuPolicy.laneHeight(fitting: 96)]])
 case "empty": placed([])
 default: fatalError("Unknown synthetic test case")
 }
@@ -131,10 +187,11 @@ class DanmakuPolicyTests(unittest.TestCase):
                               self.source, re.MULTILINE | re.DOTALL)
             if model is None:
                 self.fail("Cannot extract the actual DYDanmaku model")
-            # The marked section also contains a SwiftUI menu; exclude it.
-            policy = self.source.split(START, 1)[1].split(END, 1)[0]
-            policy = policy.split("/// 共用在推荐", 1)[0]
+            # The marked section also contains SwiftUI views; cut at the options menu struct.
+            policy = self.source.split(START, 1)[1].split("struct DYDanmakuOptions", 1)[0]
             self.assertIn("enum DYDanmakuPolicy", policy)
+            self.assertIn("enum DYDanmakuSettings", policy,
+                          "settings contract must stay Foundation-only inside the policy slice")
             cls.temp = tempfile.TemporaryDirectory(prefix=".danmaku-regression-", dir=ROOT)
             tmp = Path(cls.temp.name)
             swift = tmp / "main.swift"
@@ -156,21 +213,87 @@ class DanmakuPolicyTests(unittest.TestCase):
         self.require_policy()
 
     def test_region_complete_rows_stay_in_top_third(self):
+        lane_heights = {10: 19, 15: 28, 28: 52}
         for row in self.run_case("region"):
-            with self.subTest(height=row["height"], inset=row["inset"], density=row["density"]):
+            with self.subTest(height=row["height"], inset=row["inset"], density=row["density"],
+                              fontSize=row["fontSize"], lines=row["lines"]):
                 cap = [2, 4, 6][row["density"]]
                 top = max(0, row["inset"]) + 64
                 bottom = row["height"] / 3
-                expected = min(cap, max(0, math.floor((bottom - top) / 28)))
-                self.assertEqual(row["laneHeight"], 28)
+                lane_height = lane_heights[row["fontSize"]]
+                self.assertEqual(row["laneHeight"], lane_height)
                 self.assertEqual(row["gap"], 28)
                 self.assertEqual(row["maxLanes"], cap)
                 self.assertEqual(row["maxPerSecond"], [1, 2, 4][row["density"]])
                 self.assertAlmostEqual(row["top"], top)
                 self.assertAlmostEqual(row["bottom"], bottom)
-                self.assertEqual(row["lanes"], expected)
+                limit = min(row["lines"], 10) if row["lines"] else cap
+                fitted = max(0, math.floor((bottom - top) / lane_height))
+                self.assertEqual(row["lanes"], min(limit, fitted))
+                self.assertLessEqual(row["lanes"], 10)
                 if row["lanes"]:
-                    self.assertLessEqual(top + row["lanes"] * 28, bottom + 1e-8)
+                    self.assertLessEqual(top + row["lanes"] * lane_height, bottom + 1e-8)
+
+    def test_manual_ten_lines_clip_to_available_top_third(self):
+        lanes = {}
+        for row in self.run_case("region"):
+            if row["inset"] == 59 and row["density"] == 2 and row["lines"] == 10:
+                lanes[(row["fontSize"], row["height"])] = row["lanes"]
+        for height, expected in {600: 1, 844: 3, 926: 3, 1200: 5}.items():
+            with self.subTest(fontSize=28, height=height):
+                self.assertEqual(lanes[(28, height)], expected,
+                                 "28pt text only fits what the top third allows")
+        for height, expected in {844: 8, 926: 9}.items():
+            with self.subTest(fontSize=10, height=height):
+                self.assertEqual(lanes[(10, height)], expected)
+        self.assertGreater(lanes[(10, 1200)], lanes[(28, 1200)])
+
+    def test_font_size_scales_width_and_duration(self):
+        rows = self.run_case("fontScale")
+        base = next(r for r in rows if r["fontSize"] == 15)
+        lane_heights = {10: 19, 12: 22, 15: 28, 18: 34, 22: 41, 26: 49, 28: 52}
+        widths = []
+        for row in rows:
+            with self.subTest(fontSize=row["fontSize"]):
+                widths.append(row["width"])
+                self.assertAlmostEqual(row["width"], base["width"] * row["fontSize"] / 15, places=6)
+                self.assertAlmostEqual(row["dur"], (390 + row["width"]) / 100, places=6)
+                self.assertEqual(row["laneHeight"], lane_heights[row["fontSize"]])
+        self.assertEqual(widths, sorted(widths))
+        self.assertGreater(widths[-1], widths[0] * 2.5)
+
+    def test_large_font_keeps_tail_gap_between_neighbours(self):
+        output = self.run_case("fontCollision")
+        self.assertGreater(len(output), 1)
+        self.assertGreater(max(p["width"] for p in output), 390,
+                           "28pt long text must span the whole screen")
+        lanes = collections.defaultdict(list)
+        for p in output:
+            self.assertLess(p["lane"], 2)
+            self.assertAlmostEqual(p["dur"], (390 + p["width"]) / 100, places=6)
+            lanes[p["lane"]].append(p)
+        for lane in lanes.values():
+            lane.sort(key=lambda p: p["offset"])
+            for previous, current in zip(lane, lane[1:]):
+                travelled = (current["offset"] - previous["offset"]) * 100
+                self.assertGreaterEqual(travelled + 1e-7, previous["width"] + 28)
+
+    def test_layout_lane_count_caps_at_ten_rows(self):
+        output = self.run_case("linesCap")
+        self.assertEqual(sorted({p["lane"] for p in output}), list(range(10)))
+
+    def test_default_arguments_keep_fifteen_point_layout(self):
+        output = self.run_case("fontDefaults")
+        self.assertTrue(output["layout"])
+        self.assertEqual(output["layout"], output["explicit"])
+        self.assertEqual(output["region"], output["explicitRegion"])
+
+    def test_settings_clamps_nonfinite_and_out_of_range_values(self):
+        output = self.run_case("settingsClamp")
+        self.assertEqual(output["font"], [15, 15, 10, 28, 18])
+        self.assertEqual(output["lines"], [0, 0, 4, 10])
+        self.assertEqual(output["opacity"], [0.92, 0.1, 1, 0.62])
+        self.assertEqual(output["laneHeight"], [19, 28, 19, 52, 52])
 
     def test_density_caps_and_distinct_throughput(self):
         counts = []
