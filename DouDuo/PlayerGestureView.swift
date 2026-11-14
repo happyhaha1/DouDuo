@@ -7,10 +7,6 @@ struct DYPlaybackPressKey: PreferenceKey {
     static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
 }
 
-extension EnvironmentValues {
-    /// 本次浏览会话的清屏开关，翻页保留；详情播放器独立持有。
-    @Entry var dyClearScreen: Binding<Bool> = .constant(false)
-}
 
 // MARK: - UIKit 手势宿主：Pan 起手定方向（短视频横向导航/影库横向快进，竖向漏给 ScrollView）+ 单击/双击/长按
 // 纯 SwiftUI 的 .gesture/.simultaneousGesture 会吞掉整段手势序列导致竖滑分页失效；

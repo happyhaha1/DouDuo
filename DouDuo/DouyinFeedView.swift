@@ -1282,7 +1282,6 @@ struct DYUpstreamFeedScreen: View {
     /// 自动测试用：DOUDUO_OPEN=player 直接打开列表播放器（验证返回键与左缘右滑退出）
     @State private var debugPlayer = false
     @State private var playbackPressHeld = false
-    @State private var clearScreen = false
     @ObservedObject private var network = DDNetworkPolicy.shared
     @AppStorage("douyin_hide_status_bar_v1") private var hideStatusBar = false
     @AppStorage(DDVideoQualityPolicy.defaultKey) private var defaultQuality = "auto"
@@ -1313,8 +1312,8 @@ struct DYUpstreamFeedScreen: View {
                         Color.clear.preference(key: DYTopChromeFrameKey.self, value: proxy.frame(in: .named("douduo.feed")))
                     }
                 }
-                .opacity(playbackPressHeld || clearScreen ? 0 : 1)
-                .allowsHitTesting(!playbackPressHeld && !clearScreen)
+                .opacity(playbackPressHeld ? 0 : 1)
+                .allowsHitTesting(!playbackPressHeld)
             }
         }
         .overlayPreferenceValue(DYFeedRailPreference.self) { entries in
@@ -1326,7 +1325,7 @@ struct DYUpstreamFeedScreen: View {
             }
         }
         .overlay {
-            if railMode, !clearScreen, !playbackPressHeld, !(tab == .live && (live.clean || live.entered)) {
+            if railMode, !playbackPressHeld, !(tab == .live && (live.clean || live.entered)) {
                 if tab == .live, layoutAModuleAnchor.active, feedHost.width > 1 {
                     layoutAModuleButton
                         .modifier(DDChromeOpacity(.top))
@@ -1336,9 +1335,7 @@ struct DYUpstreamFeedScreen: View {
             }
         }
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
-        .environment(\.dyClearScreen, $clearScreen)
-        .onChange(of: tab) { _, _ in clearScreen = false }
-        .statusBarHidden(playbackPressHeld || clearScreen || hideStatusBar)
+        .statusBarHidden(playbackPressHeld || hideStatusBar)
         .onPreferenceChange(DYTopChromeFrameKey.self) { next in
             guard abs(next.maxY - topChrome.maxY) > 0.5 || abs(next.minY - topChrome.minY) > 0.5 else { return }
             topChrome = next
@@ -2019,7 +2016,6 @@ struct DYUpstreamFeedScreen: View {
                             } else {
                                 Color.clear.frame(height: 50).allowsHitTesting(false)
                             }
-                            if clearScreen { Spacer(minLength: 0) }
                             if let entry {
                                 entry.actions.id("\(entry.tab)-\(entry.id)")
                             }
@@ -2797,6 +2793,10 @@ struct DYClassicFeedScreen: View {
     @State private var topChrome = CGRect.zero
     @State private var supportsSidePanel = false
     @State private var residentComments = false
+    @AppStorage(DDVideoQualityPolicy.pickKey) private var qualityPreference = ""
+    @State private var showPersonalization = false
+    @ObservedObject private var network = DDNetworkPolicy.shared
+    @AppStorage(DDVideoQualityPolicy.defaultKey) private var defaultQuality = "auto"
     private var liveRoomOpen: Bool { tab == .live && live.entered }
     private var sidePanelOpen: Bool { residentComments || (supportsSidePanel && (authorTarget != nil || showComments)) }
     private var hidesVideoChrome: Bool { showComments || residentComments || authorTarget != nil || liveRoomOpen }
@@ -2811,6 +2811,16 @@ struct DYClassicFeedScreen: View {
 
     private var currentIndex: Int? { currentID.flatMap { id in feed.items.firstIndex { $0.id == id } } }
     private var current: DYAweme? { currentIndex.map { feed.items[$0] } }
+
+    /// 三点菜单里选的画质：作用在当前条，跟着 feed 数据而不是翻页状态。
+    private var effectiveQuality: String { qualityPreference.isEmpty ? defaultQuality : qualityPreference }
+    private var qualitySources: [DDVideoQuality] { current?.qualitySources ?? [] }
+    private var qualityMenuTitle: String {
+        guard let item = current,
+              let source = DDVideoQualityPolicy.select(item, preference: effectiveQuality, savingData: network.isSavingData)
+        else { return "画质" }
+        return "画质 · \(source.title)"
+    }
     private var commentAweme: DYAweme? { tab == .follow ? visibleVideo : current }
 
     var body: some View {
@@ -2820,6 +2830,7 @@ struct DYClassicFeedScreen: View {
         .fullScreenCover(isPresented: $showSearch) {
             DYSearchScreen(bridge: bridge, onAuthor: { a in authorTarget = a.author })
         }
+        .sheet(isPresented: $showPersonalization) { DDPlaybackPreferencesView() }
         .background(DouyinBridgeHost(bridge: bridge).frame(width: 1, height: 1).allowsHitTesting(false))
         .task {
             guard !initialized else { return }
@@ -3561,6 +3572,19 @@ struct DYClassicFeedScreen: View {
     private var moreExtrasMenu: some View {
         Section {
             DYChromeModePicker()
+            Menu {
+                Picker("画质", selection: $qualityPreference) {
+                    Text("跟随默认设置").tag("")
+                    Text("自动（跟随省流）").tag("auto")
+                    Text("最高画质").tag("best")
+                    Text("省流画质").tag("low")
+                    ForEach(qualitySources) { source in Text(source.title).tag(source.url) }
+                }
+                .pickerStyle(.menu)
+            } label: { Label(qualityMenuTitle, systemImage: "sparkles.tv") }
+            .accessibilityIdentifier("douyin.quick.quality")
+            Button("个性化与播放", systemImage: "slider.horizontal.3") { showPersonalization = true }
+                .accessibilityIdentifier("douyin.personalization")
             Button("刷新推荐", systemImage: "arrow.clockwise") {
                 Task { await refreshRecommendations() }
             }
@@ -3620,7 +3644,7 @@ struct DYUpstreamVideoPage: View {
     }
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.dyClearScreen) private var clearScreen
+
     let item: DYAweme
     let isCurrent: Bool
     /// 紧邻当前条的下一条：提前建播放器并预滚，滑到时直接 play()
@@ -3656,6 +3680,7 @@ struct DYUpstreamVideoPage: View {
     @FocusState private var danmakuFocused: Bool
     @AppStorage("douyin_autofit_v1") private var autoFit = true
     @AppStorage("douyin_danmaku_v1") private var danmakuOn = true
+    @AppStorage(DDPlaybackBehavior.doubleTapLikeKey) private var doubleTapLike = DDPlaybackBehavior.defaultDoubleTapLike
     @AppStorage("douyin_playback_rate_v1") private var playbackRate = 1.0
     @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     private var chromeMode: DDChromeMode { DDChromeMode(rawValue: chromeModeRaw) ?? .classic }
@@ -3703,7 +3728,7 @@ struct DYUpstreamVideoPage: View {
                                     resumePosition: resume, compactChrome: true,
                                     preparedPlayer: selectedQuality.isEmpty ? { preloader.take(item.id) } : nil,
                                     onEnded: autoNext ? onEnded : nil,
-                                    onDoubleTap: onComments,
+                                    onDoubleTap: doubleTapLike ? onLike : onComments,
                                     onSavePosition: onSavePosition, onClose: {}, fillWidth: autoFit,
                                     danmaku: danmakuOn ? danmaku : [],
                                     altURL: selected?.alternate.flatMap(URL.init(string:)) ?? item.playAlt.flatMap(URL.init(string:)),
@@ -3729,9 +3754,8 @@ struct DYUpstreamVideoPage: View {
                 DYAdaptiveActionRail { edge in
                     HStack(alignment: .bottom, spacing: 12) {
                         if edge == .leading { actionRail(fg, edge: edge) }
-                        if clearScreen.wrappedValue || !chromeMode.hidesInfo || (isCurrent && peek.on) {
+                        if !chromeMode.hidesInfo || (isCurrent && peek.on) {
                             info(fg)
-                                .opacity(clearScreen.wrappedValue ? 0.5 : 1)
                                 .transition(.opacity)
                         }
                         Spacer(minLength: 0)
@@ -3745,12 +3769,11 @@ struct DYUpstreamVideoPage: View {
                 .accessibilityHidden(pressHeld)
                 .animation(.easeOut(duration: 0.15), value: pressHeld)
             } else {
-                // 默认：左下信息 + 右侧按钮栏，清屏时保留半透明信息和退出按钮。
+                // 默认：左下信息 + 右侧按钮栏。
                 HStack(alignment: .bottom, spacing: 12) {
                     info(fg)
-                        .opacity(clearScreen.wrappedValue ? 0.5 : 1)
                     Spacer(minLength: 0)
-                    actions(fg)
+                    actionButtons(fg)
                         .offset(x: DYDuoMetrics.actionRailHorizontalOffset(
                             isRegular: hSize == .regular, trailingInset: systemColumnInset,
                             columnWidth: actionColumnWidth, outerPadding: chromeSidePadding,
@@ -3769,8 +3792,8 @@ struct DYUpstreamVideoPage: View {
         .overlay(alignment: .bottom) {
             if showDanmakuInput {
                 danmakuBar.padding(.bottom, max(insets.bottom, 12) + 6)
-                    .opacity(pressHeld || clearScreen.wrappedValue ? 0 : 1)
-                    .allowsHitTesting(!pressHeld && !clearScreen.wrappedValue)
+                    .opacity(pressHeld ? 0 : 1)
+                    .allowsHitTesting(!pressHeld)
             }
         }
         .preference(key: DYFeedRailPreference.self, value: railEntry(fg))
@@ -3797,7 +3820,7 @@ struct DYUpstreamVideoPage: View {
 
     private func railEntry(_ fg: Color) -> [DYFeedRailEntry] {
         guard isCurrent, onBack == nil, let rootRailTab else { return [] }
-        return [DYFeedRailEntry(id: item.id, tab: rootRailTab, actions: AnyView(actions(fg)))]
+        return [DYFeedRailEntry(id: item.id, tab: rootRailTab, actions: AnyView(actionButtons(fg)))]
     }
 
     private var danmakuBar: some View {
@@ -3923,22 +3946,13 @@ struct DYUpstreamVideoPage: View {
             if rootRailTab != nil && onBack == nil {
                 Color.clear.frame(width: actionColumnWidth, height: 0).allowsHitTesting(false)
             } else {
-                actions(fg)
+                actionButtons(fg)
                     .fixedSize()
                     .modifier(DYRailReservedNudge(railEdge: edge))
                     .padding(.bottom, item.images.isEmpty ? 56 : 0)
             }
         }
         .padding(.horizontal, hSize == .compact ? 9 : 0)
-    }
-
-    @ViewBuilder
-    private func actions(_ fg: Color) -> some View {
-        if clearScreen.wrappedValue {
-            clearScreenButton(fg, dimmed: true)
-        } else {
-            actionButtons(fg)
-        }
     }
 
     private func actionButtons(_ fg: Color) -> some View {
@@ -3982,33 +3996,9 @@ struct DYUpstreamVideoPage: View {
             .ddGlassCapsule()
             .frame(width: actionColumnWidth)
             moreMenu(fg)
-            clearScreenButton(fg)
         }
         .themeShadow(.mediaLabel)
         .modifier(DDChromeOpacity(.controls))
-    }
-
-    private func clearScreenButton(_ fg: Color, dimmed: Bool = false) -> some View {
-        Button {
-            guard !boost.blocksTap else { return }
-            clearScreen.wrappedValue.toggle()
-            showDanmakuInput = false
-            danmakuFocused = false
-        } label: {
-            Image(systemName: clearScreen.wrappedValue ? "rectangle.inset.filled" : "rectangle")
-                .font(.title2.weight(.medium))
-                .foregroundStyle(fg)
-                .frame(width: 50, height: 50)
-                .contentShape(Circle())
-                .ddGlassCircle()
-                .frame(width: actionColumnWidth)
-                .opacity(dimmed ? 0.5 : 1)
-        }
-        .buttonStyle(.plain)
-        .modifier(DYHoldBoost(control: boost))
-        .allowsHitTesting(true)
-        .accessibilityLabel(clearScreen.wrappedValue ? "退出清屏" : "清屏")
-        .accessibilityIdentifier("douyin.clearScreen")
     }
 
     private func railItem(_ icon: String, _ text: String, tint: Color, _ id: String, _ act: @escaping () -> Void) -> some View {
@@ -4215,6 +4205,14 @@ struct DYClassicVideoPage: View {
     @FocusState private var danmakuFocused: Bool
     @AppStorage("douyin_autofit_v1") private var autoFit = true
     @AppStorage("douyin_danmaku_v1") private var danmakuOn = true
+    @AppStorage(DDVideoQualityPolicy.defaultKey) private var defaultQuality = "auto"
+    @AppStorage(DDPlaybackBehavior.doubleTapLikeKey) private var doubleTapLike = DDPlaybackBehavior.defaultDoubleTapLike
+    @AppStorage(DDVideoQualityPolicy.pickKey) private var qualityPreference = ""
+    @ObservedObject private var network = DDNetworkPolicy.shared
+    private var preference: String { qualityPreference.isEmpty ? defaultQuality : qualityPreference }
+    private var source: DDVideoQuality? {
+        DDVideoQualityPolicy.select(item, preference: preference, savingData: network.isSavingData)
+    }
 
     init(item: DYAweme, isCurrent: Bool, insets: EdgeInsets, resume: Double?, liked: Bool, collected: Bool,
          onLike: @escaping () -> Void, onCollect: @escaping () -> Void, onDoubleTap: @escaping () -> Void,
@@ -4237,9 +4235,10 @@ struct DYClassicVideoPage: View {
     var body: some View {
         let fg = theme.media.onMedia.color(for: scheme)
         ZStack(alignment: .bottomLeading) {
-            if item.images.isEmpty, let s = item.play, let remote = URL(string: s) {
-                // 只用「整条缓存」或「在线流」：不再走头部缓存 + 接续（那一下切换必然闪/卡）
-                let url = DYVideoCache.localURL(item.id) ?? remote
+            if item.images.isEmpty, let chosen = source?.url ?? item.play, let remote = URL(string: chosen) {
+                // 显式选档绕过未标注画质的旧磁盘缓存，避免「最高画质」仍播低清文件。
+                let useCache = preference == "auto" && !network.isSavingData
+                let url = useCache ? (DYVideoCache.localURL(item.id) ?? remote) : remote
                 // 复用播放器：左右切换作者/关注、双击点赞、分区长按、竖滑切视频、底部拖动进度及 VLC 兜底
                 PlayerPage.external(id: item.id, title: item.desc, url: url, durationSec: item.duration,
                                     isActive: isCurrent, topInset: insets.top, bottomInset: mediaBottomInset,
@@ -4247,6 +4246,10 @@ struct DYClassicVideoPage: View {
                                     preparedPlayer: { preloader.take(item.id) },
                                     onEnded: autoNext ? onEnded : nil,
                                     onDoubleTap: {
+                                        guard doubleTapLike else {
+                                            onComments()
+                                            return
+                                        }
                                         onDoubleTap()
                                         heart = true
                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { heart = false }
@@ -4254,9 +4257,9 @@ struct DYClassicVideoPage: View {
                                     onSavePosition: onSavePosition, onClose: {}, fillWidth: autoFit,
                                     onFillWidthChange: { autoFit = $0 },
                                     danmaku: danmakuOn ? danmaku : [],
-                                    altURL: item.playAlt.flatMap(URL.init(string:)),
-                                    quality: item.q,
-                                    fastURL: item.playFast.flatMap(URL.init(string:)),
+                                    altURL: source?.alternate.flatMap(URL.init(string:)) ?? item.playAlt.flatMap(URL.init(string:)),
+                                    quality: source?.title ?? item.q,
+                                    fastURL: preference == "auto" && !network.isSavingData ? item.playFast.flatMap(URL.init(string:)) : nil,
                                     posterURL: item.cover.flatMap(URL.init(string:)),
                                     videoAspect: item.height > 0 ? item.width / item.height : 0,
                                     headEndSeconds: nil,

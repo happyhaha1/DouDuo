@@ -324,7 +324,6 @@ struct PlayerPage: View {
     @State private var pendingPosition: Double?
     @State private var sourceError: String?
     @State private var pageActive = false
-    @Environment(\.dyClearScreen) private var clearScreen
     @Environment(\.ddScale) private var ui
 
     private var dmStress: Bool {
@@ -456,7 +455,7 @@ struct PlayerPage: View {
                     .allowsHitTesting(false)
             }
             // 常驻倍速角标：只要不是 1 倍就一直显示；长按时再提示「下滑锁定 / 上滑取消」
-            if !cleanScreen && (effectiveRate != 1 || rateBoost) && (!clearScreen.wrappedValue || pressHeld) {
+            if !cleanScreen && (effectiveRate != 1 || rateBoost) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rateText(rateBoost ? 2 : effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
                         .accessibilityIdentifier("douyin.rateBadge")
@@ -489,7 +488,7 @@ struct PlayerPage: View {
             }
         }
         .overlay(alignment: .bottom) {
-            if isActive, !rateBoost, !cleanScreen, (!progressOnRail || clearScreen.wrappedValue) {
+            if isActive, !rateBoost, !cleanScreen, !progressOnRail {
                 progressBar
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("视频进度")
@@ -497,7 +496,7 @@ struct PlayerPage: View {
                     .accessibilityIdentifier("douyin.progress")
                     .padding(chromeInsets)
                     .padding(.bottom, DYDuoMetrics.mediaBottomPadding(bottomInset))
-                    .opacity(pressHeld ? 0 : clearScreen.wrappedValue ? 0.5 : 1)
+                    .opacity(pressHeld ? 0 : 1)
                     .allowsHitTesting(!pressHeld)
                     .modifier(DDChromeOpacity(.progress))
             }

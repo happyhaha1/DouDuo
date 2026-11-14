@@ -521,12 +521,10 @@ enum DYDanmakuSettings {
     static let fontSizeKey = "douyin_danmaku_font_size_v1"
     static let linesKey = "douyin_danmaku_lines_v1"
     static let opacityKey = "douyin_danmaku_opacity_v1"
-    static let inClearKey = "douyin_danmaku_in_clear_v1"
 
     static let defaultFontSize: Double = 15
     static let defaultLines: Int = 0
     static let defaultOpacity: Double = 0.92
-    static let defaultInClear: Bool = true
 
     static let fontSizeRange: ClosedRange<Double> = 10...28
     static let linesRange: ClosedRange<Int> = 0...10
@@ -556,7 +554,6 @@ struct DYDanmakuOptions: View {
     @AppStorage(DYDanmakuSettings.fontSizeKey) private var fontSize = DYDanmakuSettings.defaultFontSize
     @AppStorage(DYDanmakuSettings.linesKey) private var lines = DYDanmakuSettings.defaultLines
     @AppStorage(DYDanmakuSettings.opacityKey) private var opacity = DYDanmakuSettings.defaultOpacity
-    @AppStorage(DYDanmakuSettings.inClearKey) private var inClear = DYDanmakuSettings.defaultInClear
 
     private var currentDensity: DYDanmakuPolicy.Density { DYDanmakuPolicy.Density(rawValue: density) ?? .standard }
     private var fontPoint: Int { Int(DYDanmakuSettings.fontSizeValue(fontSize).rounded()) }
@@ -580,8 +577,6 @@ struct DYDanmakuOptions: View {
             }
             Toggle("显示弹幕", isOn: $enabled)
                 .accessibilityIdentifier("douyin.danmaku.enabled")
-            Toggle("清屏时显示", isOn: $inClear)
-                .accessibilityIdentifier("douyin.danmaku.inClear")
             Picker("弹幕密度", selection: $density) {
                 ForEach(DYDanmakuPolicy.Density.allCases) { option in Text(option.title).tag(option.rawValue) }
             }
@@ -606,7 +601,7 @@ struct DYDanmakuOptions: View {
             Label("弹幕 · \(currentDensity.title) · \(fontPoint)pt", systemImage: "text.bubble")
         }
         .accessibilityIdentifier("douyin.danmaku.settings")
-        .accessibilityValue("\(currentDensity.title)，字号\(fontPoint)pt，行数\(lines == 0 ? "自动" : "最多\(lines)行")，透明度\(opacityPercent)%，清屏\(inClear ? "显示" : "隐藏")，去重\(deduplicate ? "开启" : "关闭")")
+        .accessibilityValue("\(currentDensity.title)，字号\(fontPoint)pt，行数\(lines == 0 ? "自动" : "最多\(lines)行")，透明度\(opacityPercent)%，去重\(deduplicate ? "开启" : "关闭")")
     }
 }
 // MARK: - 弹幕层（视频）
@@ -650,14 +645,10 @@ struct DYDanmakuLayer: View {
     @AppStorage(DYDanmakuSettings.fontSizeKey) private var fontSizeRaw = DYDanmakuSettings.defaultFontSize
     @AppStorage(DYDanmakuSettings.linesKey) private var linesRaw = DYDanmakuSettings.defaultLines
     @AppStorage(DYDanmakuSettings.opacityKey) private var opacityRaw = DYDanmakuSettings.defaultOpacity
-    @AppStorage(DYDanmakuSettings.inClearKey) private var visibleInClear = DYDanmakuSettings.defaultInClear
-    @Environment(\.dyClearScreen) private var clearScreen
 
     private var fontSize: CGFloat { CGFloat(DYDanmakuSettings.fontSizeValue(fontSizeRaw)) }
     private var lines: Int { DYDanmakuSettings.linesValue(linesRaw) }
     private var opacity: Double { DYDanmakuSettings.opacityValue(opacityRaw) }
-    /// 清屏隐藏手机 UI 时是否一并隐藏弹幕；默认保留（清屏后弹幕照常滚动）。
-    private var hiddenByClearScreen: Bool { clearScreen.wrappedValue && !visibleInClear }
 
     private var renderItems: [DYDanmaku] {
         #if DEBUG
@@ -669,48 +660,41 @@ struct DYDanmakuLayer: View {
     }
 
     var body: some View {
-        Group {
-            if hiddenByClearScreen {
-                Color.clear
-            } else {
-                GeometryReader { g in
-                    let w = g.size.width
-                    let density = DYDanmakuPolicy.Density(rawValue: densityRaw) ?? .standard
-                    let region = DYDanmakuPolicy.region(height: g.size.height, topInset: topInset,
-                                                        density: density, fontSize: fontSize, lines: lines)
-                    let lane = DYDanmakuPolicy.laneHeight(fitting: fontSize)
-                    let speed = (w + 200) / 7
-                    let placed = DYDanmakuLayout.shared.get(renderItems, w: w, lanes: region.lanes, speed: speed,
-                                                          density: density, deduplicate: deduplicate, fontSize: fontSize)
-                    TimelineView(.animation(minimumInterval: nil, paused: !clock.playing)) { ctx in
-                        let t = clock.now(ctx.date)
-                        Canvas(rendersAsynchronously: false) { gc, _ in
-                            var regionContext = gc
-                            regionContext.clip(to: Path(CGRect(x: 0, y: region.top, width: w, height: max(0, region.bottom - region.top))))
-                            for p in placed where t >= p.d.offset && t <= p.d.offset + p.dur {
-                                let x = w - CGFloat(t - p.d.offset) * speed
-                                let y = region.top + CGFloat(p.lane) * lane
-                                guard let sym = regionContext.resolveSymbol(id: p.d.id) else { continue }
-                                regionContext.draw(sym, at: CGPoint(x: x, y: y), anchor: .topLeading)
-                            }
-                        } symbols: {
-                            // 只排版一次，逐帧移动贴图；区域外再裁剪，避免遮挡下方内容。
-                            ForEach(placed, id: \.d.id) { p in
-                                Text(p.d.text)
-                                    .font(.system(size: fontSize, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(opacity))
-                                    .shadow(color: .black.opacity(0.7), radius: 1.5, y: 1)
-                                    .lineLimit(1)
-                                    .fixedSize()
-                                    .tag(p.d.id)
-                            }
-                        }
+        GeometryReader { g in
+            let w = g.size.width
+            let density = DYDanmakuPolicy.Density(rawValue: densityRaw) ?? .standard
+            let region = DYDanmakuPolicy.region(height: g.size.height, topInset: topInset,
+                                                density: density, fontSize: fontSize, lines: lines)
+            let lane = DYDanmakuPolicy.laneHeight(fitting: fontSize)
+            let speed = (w + 200) / 7
+            let placed = DYDanmakuLayout.shared.get(renderItems, w: w, lanes: region.lanes, speed: speed,
+                                                  density: density, deduplicate: deduplicate, fontSize: fontSize)
+            TimelineView(.animation(minimumInterval: nil, paused: !clock.playing)) { ctx in
+                let t = clock.now(ctx.date)
+                Canvas(rendersAsynchronously: false) { gc, _ in
+                    var regionContext = gc
+                    regionContext.clip(to: Path(CGRect(x: 0, y: region.top, width: w, height: max(0, region.bottom - region.top))))
+                    for p in placed where t >= p.d.offset && t <= p.d.offset + p.dur {
+                        let x = w - CGFloat(t - p.d.offset) * speed
+                        let y = region.top + CGFloat(p.lane) * lane
+                        guard let sym = regionContext.resolveSymbol(id: p.d.id) else { continue }
+                        regionContext.draw(sym, at: CGPoint(x: x, y: y), anchor: .topLeading)
                     }
-                    .frame(width: w, height: g.size.height)
+                } symbols: {
+                    // 只排版一次，逐帧移动贴图；区域外再裁剪，避免遮挡下方内容。
+                    ForEach(placed, id: \.d.id) { p in
+                        Text(p.d.text)
+                            .font(.system(size: fontSize, weight: .semibold))
+                            .foregroundStyle(.white.opacity(opacity))
+                            .shadow(color: .black.opacity(0.7), radius: 1.5, y: 1)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .tag(p.d.id)
+                    }
                 }
             }
+            .frame(width: w, height: g.size.height)
         }
-        .allowsHitTesting(false)
     }
 }
 
@@ -890,7 +874,6 @@ struct DYListPlayer: View {
     @State private var toast: String?
     @State private var loadingMore = false
     @State private var playbackPressHeld = false
-    @State private var clearScreen = false
     /// 左缘右滑退出的跟手位移
     @State private var backDrag: CGFloat = 0
     /// 从消息点评论进来：自动开评论区并定位那条评论
@@ -974,8 +957,7 @@ struct DYListPlayer: View {
             }
         }
         .onPreferenceChange(DYPlaybackPressKey.self) { playbackPressHeld = $0 }
-        .environment(\.dyClearScreen, $clearScreen)
-        .statusBarHidden(playbackPressHeld || clearScreen)
+        .statusBarHidden(playbackPressHeld)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.list.player")
         // 全屏播放器自带一套 chrome：既不继承分屏作者页隐藏的侧栏，也不继承首页钉住的顶部栏。

@@ -15,6 +15,8 @@ struct DDVideoQuality: Codable, Equatable, Identifiable, Sendable {
 
 enum DDVideoQualityPolicy {
     static let defaultKey = "douyin_video_quality_v1"
+    /// 经典布局三点菜单里选中的画质，与页面共用同一枚键。
+    static let pickKey = "douyin_video_quality_pick_v1"
 
     static func select(_ item: DYAweme, preference: String, savingData: Bool) -> DDVideoQuality? {
         let sources = item.qualitySources ?? []
@@ -30,6 +32,12 @@ enum DDVideoQualityPolicy {
         return DDVideoQuality(url: url, alternate: item.playAlt,
                               height: Int(min(item.width, item.height)), bitrate: 0, isHEVC: false)
     }
+}
+
+/// 双击手势的行为契约：两套布局共用同一枚开关。
+enum DDPlaybackBehavior {
+    static let doubleTapLikeKey = "douyin_double_tap_like_v1"
+    static let defaultDoubleTapLike = false
 }
 
 enum DDRecommendationTimeFilter {
@@ -113,13 +121,13 @@ struct DDPlaybackPreferencesView: View {
     @AppStorage("douyin_start_muted_v1") private var startMuted = false
     @AppStorage("douyin_volume_unmutes_v1") private var volumeUnmutes = true
     @AppStorage("douyin_hide_status_bar_v1") private var hideStatusBar = false
+    @AppStorage(DDPlaybackBehavior.doubleTapLikeKey) private var doubleTapLike = DDPlaybackBehavior.defaultDoubleTapLike
     @AppStorage("douyin_show_music_v1") private var showMusic = true
     @AppStorage("douyin_show_publication_v1") private var showPublication = true
     @AppStorage("douyin_danmaku_v1") private var danmaku = true
     @AppStorage("douyin_danmaku_font_size_v1") private var danmakuSize = 15.0
     @AppStorage("douyin_danmaku_lines_v1") private var danmakuLines = 0
     @AppStorage("douyin_danmaku_opacity_v1") private var danmakuOpacity = 0.92
-    @AppStorage("douyin_danmaku_in_clear_v1") private var danmakuInClear = true
     @AppStorage(DDRecommendationTimeFilter.unitKey) private var recentUnit = "off"
     @AppStorage(DDRecommendationTimeFilter.valueKey) private var recentValue = 7
     @AppStorage(DDRecommendationTimeFilter.undatedKey) private var includeUndated = true
@@ -152,7 +160,7 @@ struct DDPlaybackPreferencesView: View {
                     ForEach(DDChromeGroup.allCases) { DDOpacitySetting($0) }
                     Toggle("隐藏系统状态栏", isOn: $hideStatusBar)
                 } header: { Text("分组透明度") } footer: {
-                    Text("10%–100%，保存后即时生效。清屏仍保留半透明信息、可拖进度与退出按钮；退出按钮始终可见。")
+                    Text("10%–100%，保存后即时生效；只影响默认布局的常驻信息，经典布局由系统清屏控制。")
                     HStack(spacing: 12) {
                         Image(systemName: "person.crop.circle").modifier(DDChromeOpacity(.author))
                         Text("作者信息").modifier(DDChromeOpacity(.author))
@@ -169,6 +177,12 @@ struct DDPlaybackPreferencesView: View {
                     Text("仅解除本次启动静音，保留手动静音设置。系统音量已在上限或下限、音量没有实际变化时，请手动解除。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section {
+                    Toggle("双击点赞", isOn: $doubleTapLike)
+                        .accessibilityIdentifier("douyin.personalization.doubleTapLike")
+                } header: { Text("双击手势") } footer: {
+                    Text("开启：双击点赞并显示心形；关闭：双击打开评论区。默认布局、经典布局、关注与列表播放器共用这一项。")
+                }
                 Section("弹幕与作品信息") {
                     Toggle("显示弹幕", isOn: $danmaku)
                     HStack {
@@ -183,7 +197,6 @@ struct DDPlaybackPreferencesView: View {
                         ForEach(1...10, id: \.self) { Text("\($0) 行").tag($0) }
                     }
                     DDPercentSlider(title: "弹幕透明度", value: $danmakuOpacity)
-                    Toggle("清屏时保留弹幕", isOn: $danmakuInClear)
                     Toggle("显示发布时间", isOn: $showPublication)
                     Toggle("显示配乐文字", isOn: $showMusic)
                     Text("弹幕仍限制在画面上方三分之一；大字号时自动减少行数，避免重叠。隐藏配乐文字不会关闭声音。")
@@ -221,8 +234,9 @@ struct DDPlaybackPreferencesView: View {
     private func reset() {
         saver = "cellular"; liveCoverOnly = true; quality = "auto"
         startMuted = false; volumeUnmutes = true
+        doubleTapLike = DDPlaybackBehavior.defaultDoubleTapLike
         hideStatusBar = false; showMusic = true; showPublication = true
-        danmaku = true; danmakuSize = 15; danmakuLines = 0; danmakuOpacity = 0.92; danmakuInClear = true
+        danmaku = true; danmakuSize = 15; danmakuLines = 0; danmakuOpacity = 0.92
         recentUnit = "off"; recentValue = 7; includeUndated = true
         session.setOrientationLocked(false)
         session.endStartupMute()
