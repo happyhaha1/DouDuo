@@ -67,9 +67,6 @@ struct DYNativeVideoActions: View {
     let actions: DYVideoToolbarActions?
     let isClean: Bool
     let onToggleClean: () -> Void
-    /// 经典布局两项都开；经典以外的布局只借这颗清屏按钮，互动胶囊由它们自己的容器画。
-    var showsActionCapsule = true
-    var showsClean = true
     @State private var anchorFrame: CGRect = .zero
     @State private var windowHeight: CGFloat = 0
     private var slotHeight: CGFloat {
@@ -91,7 +88,7 @@ struct DYNativeVideoActions: View {
                 }
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                .hidden(!showsClean)
+                .hidden(actions == nil)
 
                 // The stable clear-screen anchor is independent of this group's size.
                 // A new item identity invalidates the native cached fitting size.
@@ -115,7 +112,7 @@ struct DYNativeVideoActions: View {
                 .sharedBackgroundVisibility(.hidden)
                 .axisBehavior(.verticalPreferred)
                 .visibilityPriority(.high)
-                .hidden(!showsActionCapsule || actions == nil || verticalEdge == nil || isClean)
+                .hidden(actions == nil || verticalEdge == nil || isClean)
             }
             // Retain the last measured slot across navigation and sheets.
             // Resetting it would briefly expand the tabs on every return,

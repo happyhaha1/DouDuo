@@ -1200,24 +1200,31 @@ final class DouDuoUITests: XCTestCase {
         sleep(5)
         return app
     }
-    /// 默认三档模式也提供清屏：和 Duo「经典」布局同位置，清屏后按钮必须留着能退出。
+    /// 四档布局的清屏按钮必须是同一颗（经典那颗眼睛），位置一致，进出清屏都不位移。
     func testDefaultChromeModesToggleCleanScreen() throws {
         continueAfterFailure = false
-        for mode in ["classic", "rail", "minimal"] {
+        for mode in ["classic", "rail", "minimal", "default"] {
             let app = launchChrome(mode)
             let clean = app.buttons["douyin.cleanScreen"].firstMatch
             XCTAssertTrue(clean.waitForExistence(timeout: 10), "\(mode) 应有清屏按钮")
             XCTAssertTrue(clean.isHittable, "\(mode) 清屏按钮应可点")
+            let resting = clean.frame
             attach(app, "clean-off-\(mode)")
             clean.tap()
             // 点完要重新取一次快照，旧句柄的 label 不会自己刷新。
-            XCTAssertTrue(wait(label: "退出清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
-                          "\(mode) 清屏后按钮应变成退出")
+            let exit = app.buttons["douyin.cleanScreen"].firstMatch
+            XCTAssertTrue(wait(label: "退出清屏", on: exit, timeout: 5), "\(mode) 清屏后按钮应变成退出")
+            XCTAssertEqual(exit.frame.minX, resting.minX, accuracy: 1, "\(mode) 清屏后按钮横向位移")
+            XCTAssertEqual(exit.frame.minY, resting.minY, accuracy: 1, "\(mode) 清屏后按钮纵向位移")
             attach(app, "clean-on-\(mode)")
             app.buttons["douyin.cleanScreen"].firstMatch.tap()
             XCTAssertTrue(wait(label: "清屏", on: app.buttons["douyin.cleanScreen"].firstMatch, timeout: 5),
                           "\(mode) 再点一次应恢复")
-            XCTAssertTrue(app.buttons["douyin.more"].firstMatch.isHittable, "\(mode) 恢复后更多按钮应回来")
+            // 简洁 / 极简把「更多」收进圆形模块入口，默认与经典留在右侧容器里。
+            let restored = mode == "rail" || mode == "minimal"
+                ? app.buttons["douyin.module.menu"].firstMatch
+                : app.buttons["douyin.more"].firstMatch
+            XCTAssertTrue(waitHittable(restored, timeout: 5), "\(mode) 恢复后入口应回来")
             app.terminate()
         }
     }
@@ -1625,6 +1632,11 @@ final class DouDuoUITests: XCTestCase {
 
     private func wait(label: String, on element: XCUIElement, timeout: TimeInterval) -> Bool {
         let exp = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: element)
+        return XCTWaiter().wait(for: [exp], timeout: timeout) == .completed
+    }
+
+    private func waitHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let exp = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: element)
         return XCTWaiter().wait(for: [exp], timeout: timeout) == .completed
     }
 
