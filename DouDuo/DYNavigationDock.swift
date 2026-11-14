@@ -47,14 +47,28 @@ struct DYVideoToolbarActions {
 struct DYCleanScreenButton: View {
     let isClean: Bool
     let action: () -> Void
+    /// 竖栏与互动列里自己套一层玻璃圆（和相邻的模块入口、更多一致）；
+    /// 系统工具栏里由系统提供背景，这里就不再加一层。
+    var circled = false
+    var iconFont: Font = .title3
+    var tint: Color = .white
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: isClean ? "eye" : "eye.slash")
-                .font(.title3)
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            if circled {
+                Image(systemName: isClean ? "eye" : "eye.slash")
+                    .font(iconFont)
+                    .foregroundStyle(tint)
+                    .frame(width: 50, height: 50)
+                    .contentShape(Circle())
+                    .ddGlassCircle()
+            } else {
+                Image(systemName: isClean ? "eye" : "eye.slash")
+                    .font(iconFont)
+                    .foregroundStyle(tint)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
         }
             .accessibilityLabel(isClean ? "退出清屏" : "清屏")
             .accessibilityIdentifier("douyin.cleanScreen")

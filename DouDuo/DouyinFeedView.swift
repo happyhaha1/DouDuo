@@ -39,12 +39,16 @@ private struct DDCleanGated<Content: View>: View {
 /// 竖栏顶端那颗眼睛：自己订阅清屏状态，图标与标签随状态立刻切换。
 private struct DDRailCleanButton: View {
     @ObservedObject var state: DYClearScreenState
+    let tint: Color
 
     var body: some View {
         Group {
             if #available(iOS 27.1, *) {
                 DYCleanScreenButton(isClean: state.isClean,
-                                    action: { withAnimation(.snappy) { state.toggle() } })
+                                    action: { withAnimation(.snappy) { state.toggle() } },
+                                    circled: true,
+                                    iconFont: .system(size: 23, weight: .medium),
+                                    tint: tint)
             }
         }
         .frame(width: 54)
@@ -2093,7 +2097,7 @@ struct DYUpstreamFeedScreen: View {
     /// 经典布局工具栏那颗眼睛的同一份视图，三档布局用在竖栏顶部。
     /// 自己订阅清屏状态：图标与标签立刻跟着换，不依赖外层容器重建。
     private var cleanButton: some View {
-        DDRailCleanButton(state: clear)
+        DDRailCleanButton(state: clear, tint: theme.media.onMedia.color(for: scheme))
     }
 
     /// 极简模式：视频进度画成包住圆形入口的外圈。从 12 点方向顺时针走；拖动进度时变粗变亮。
@@ -3126,7 +3130,9 @@ struct DYClassicFeedScreen: View {
                         // Hide the underlying native selector for compact
                         // sheets too, so dismissing comments does not restore
                         // a previously expanded tab picker over the video rail.
-                        .modifier(DYSystemTabBar(hidden: hidesVideoChrome || cleanScreen))
+                        // 评论区/UP 主页展开时不再收掉底部导航：展开内屏启动时面板默认常驻，
+                        // 旧条件会让导航条一直消失，折叠后再展开才恢复。
+                        .modifier(DYSystemTabBar(hidden: cleanScreen || liveRoomOpen || authorTarget != nil))
                 }
                 .tint(nil)
             }
@@ -4056,21 +4062,19 @@ struct DYUpstreamVideoPage: View {
 
     private func actionButtons(_ fg: Color) -> some View {
         VStack(spacing: theme.media.actionGroupSpacing) {
-            // 默认模式没有系统工具栏：用经典那颗眼睛，放在互动列最上面，清屏时也留着。
+            // 默认模式没有系统工具栏：用经典那颗眼睛，和相邻的更多一样套玻璃圆，清屏时也留着。
             if rootRailTab == nil, isCurrent, let onToggleClean {
-                Button(action: { withAnimation(.snappy) { onToggleClean() } }) {
-                    Image(systemName: cleanScreen ? "eye" : "eye.slash")
-                        .font(.title3)
-                        .foregroundStyle(fg)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                if #available(iOS 27.1, *) {
+                    DYCleanScreenButton(isClean: cleanScreen,
+                                        action: { withAnimation(.snappy) { onToggleClean() } },
+                                        circled: true,
+                                        iconFont: .system(size: theme.typography.pointSize(.displayLarge),
+                                                          weight: .semibold),
+                                        tint: fg)
+                        .modifier(DYHoldBoost(control: boost))
+                        .frame(width: actionColumnWidth)
+                        .modifier(DDChromeOpacity(.top))
                 }
-                .buttonStyle(.plain)
-                .modifier(DYHoldBoost(control: boost))
-                .accessibilityLabel(cleanScreen ? "退出清屏" : "清屏")
-                .accessibilityIdentifier("douyin.cleanScreen")
-                .frame(width: actionColumnWidth)
-                .modifier(DDChromeOpacity(.top))
             }
             if let onBack {
                 Button(action: onBack) {

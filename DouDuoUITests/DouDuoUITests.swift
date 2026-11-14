@@ -1239,6 +1239,20 @@ final class DouDuoUITests: XCTestCase {
         attach(app, "chrome-classic")
     }
 
+    /// 经典布局在展开内屏启动时评论区常驻，底部导航不能因为面板打开就被收掉。
+    func testClassicBottomNavSurvivesResidentComments() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["DOUDUO_CHROME_MODE"] = "duoClassic"
+        app.launchEnvironment["DOUDUO_FOLD"] = "1"
+        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        app.launch()
+        XCTAssertTrue(app.buttons.matching(identifier: "douyin.comment.row").firstMatch.waitForExistence(timeout: 25),
+                      "常驻评论区应可见")
+        XCTAssertTrue(app.buttons["首页"].exists && app.buttons["首页"].isHittable, "评论区常驻时底部导航应在")
+        XCTAssertTrue(app.buttons["我的"].exists, "底部导航其余项也应在")
+        attach(app, "classic-resident-nav")
+    }
+
     func testChromeModeRailMovesSearchIntoModuleMenu() throws {
         let app = launchChrome("rail")
         XCTAssertTrue(app.buttons["douyin.module.menu"].waitForExistence(timeout: 10), "简洁模式应有模块入口")
